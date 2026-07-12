@@ -1,3 +1,4 @@
 target/
 *.log
-.envcodecov.json
+.env
+codecov.json

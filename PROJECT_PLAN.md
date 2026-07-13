@@ -32,7 +32,7 @@ application code.
       (`debit`, `credit`), `posting_id` UNIQUE on `postings`.
 - [ ] Add FK from `entries.account_id` → `accounts.account_id` with status
       check (`active` only).
-- [ ] Seed the versioned chart of accounts (`chart_of_accounts`) with the
+- [x] Seed the versioned chart of accounts (`chart_of_accounts`) with the
       account types from the README (`user_custodial`, `user_payable`,
       `operational_fiat`, `operational_crypto`, `treasury_fiat`,
       `treasury_crypto`, `fx_gain_loss`, `fee_revenue`, `rail_settlement`,
@@ -40,8 +40,8 @@ application code.
       allowed directions.
 - [ ] Configure SQLX pool with `DB_ISOLATION=serializable`; assert the
       isolation level at startup and refuse to boot if weaker.
-- [ ] Add `GET /v1/chart-of-accounts` returning the versioned catalog.
-- [ ] Add `POST /v1/accounts` and a minimal `accounts` service module.
+- [x] Add `GET /v1/chart-of-accounts` returning the versioned catalog.
+- [x] Add `POST /v1/accounts` and a minimal `accounts` service module.
 
 ### Acceptance criteria
 
@@ -64,17 +64,17 @@ entries or none.
 
 ### Tasks
 
-- [ ] Define request/response DTOs for `POST /v1/postings` matching the README
+- [x] Define request/response DTOs for `POST /v1/postings` matching the README
       contract (`posting_id`, `entries[]`, `memo`, `ref_tx_id`).
-- [ ] Validate `MAX_ENTRIES_PER_POSTING` and `MAX_AMOUNT` bounds.
-- [ ] Enforce invariant: every posting has at least two entries.
-- [ ] Enforce invariant: `sum(debits) == sum(credits)` per posting, per asset.
-- [ ] Enforce invariant: every `account_id` exists and is `active`.
-- [ ] Enforce invariant: `direction` and `asset_class` are consistent with the
+- [x] Validate `MAX_ENTRIES_PER_POSTING` and `MAX_AMOUNT` bounds.
+- [x] Enforce invariant: every posting has at least two entries.
+- [x] Enforce invariant: `sum(debits) == sum(credits)` per posting, per asset.
+- [x] Enforce invariant: every `account_id` exists and is `active`.
+- [x] Enforce invariant: `direction` and `asset_class` are consistent with the
       account's chart-of-accounts definition.
 - [ ] Insert `postings` + `entries` in a single `SERIALIZABLE` transaction;
       reject atomically if any invariant fails.
-- [ ] Return `entry_id[]`, posting status, and (for now) a placeholder hash
+- [x] Return `entry_id[]`, posting status, and (for now) a placeholder hash
       chain head.
 
 ### Acceptance criteria
@@ -96,13 +96,13 @@ creating new entries.
 
 ### Tasks
 
-- [ ] Enforce `posting_id` UNIQUE on `postings`.
-- [ ] On insert conflict for `posting_id`, load and return the original
+- [x] Enforce `posting_id` UNIQUE on `postings`.
+- [x] On insert conflict for `posting_id`, load and return the original
       posting's result (entry ids, status, hash chain head) without writing.
-- [ ] Add tests for: replay after success, replay after transient failure
+- [x] Add tests for: replay after success, replay after transient failure
   that did not commit, concurrent duplicate submissions.
 - [ ] Document that the Transaction Orchestrator derives `posting_id` from
-      saga ID + step, making retries safe.
+  saga ID + step, making retries safe.
 
 ### Acceptance criteria
 
@@ -122,15 +122,15 @@ chain whose break is a fatal alert.
 
 ### Tasks
 
-- [ ] Define the canonical byte representation of an entry for hashing
+- [x] Define the canonical byte representation of an entry for hashing
       (deterministic ordering, no floats, fixed-width where possible).
-- [ ] Implement `this_hash = H(canonical(entry) || prev_hash)` using
+- [x] Implement `this_hash = H(canonical(entry) || prev_hash)` using
       `HASH_CHAIN_ALG` (default `sha256`) and mix in `HASH_CHAIN_SALT` if set.
-- [ ] Compute hashes inside the posting transaction so the chain is
+- [x] Compute hashes inside the posting transaction so the chain is
       consistent at commit.
 - [ ] Maintain `hash_chain` anchor/head rows: per-posting head and a global
       sequence head.
-- [ ] Return `hash_chain_head` from `POST /v1/postings`.
+- [x] Return `hash_chain_head` from `POST /v1/postings`.
 - [ ] Implement a verification query that walks the chain and detects any
       break.
 - [ ] Add a startup/background check that verifies the chain and raises a
@@ -154,11 +154,11 @@ statements with running balance. Reads are read-only at `SERIALIZABLE`.
 
 ### Tasks
 
-- [ ] Implement `GET /v1/accounts/:id/balance?asset=` computing the current
+- [x] Implement `GET /v1/accounts/:id/balance?asset=` computing the current
       balance from entries (debit/credit per the account's normal balance).
-- [ ] Implement `GET /v1/accounts/:id/ledger?from=&to=&limit=&cursor=`
+- [x] Implement `GET /v1/accounts/:id/ledger?from=&to=&limit=&cursor=`
       returning paginated entries with a running balance column.
-- [ ] Implement `GET /v1/postings/:id` returning the full posting with all
+- [x] Implement `GET /v1/postings/:id` returning the full posting with all
       entries and hashes.
 - [ ] Add REST (read) router distinct from the internal gRPC write path.
 - [ ] Ensure balance queries target p99 < 50 ms (indexed by `account_id`,
@@ -181,14 +181,14 @@ implicit conversion. FX is recorded via explicit postings to `fx_gain_loss`.
 
 ### Tasks
 
-- [ ] Carry `asset` on every entry; enforce that all entries in a posting
+- [x] Carry `asset` on every entry; enforce that all entries in a posting
       balance per asset (sum debits == sum credits per asset).
 - [ ] Validate `asset` against a configured asset registry (smallest-unit
       scale, `MAX_AMOUNT` per asset).
 - [ ] Document and test the FX posting pattern: convert via
       `operational_fiat` / `operational_crypto` and book the difference to
       `fx_gain_loss`.
-- [ ] Ensure user custodial accounts are per-user, per-asset and segregated
+- [x] Ensure user custodial accounts are per-user, per-asset and segregated
       from operational/treasury floats.
 - [ ] Add a query that returns the sum of `user_custodial` balances per asset
       (input to the reconciliation invariant: sum of user custodial ==
@@ -267,16 +267,16 @@ hardening.
 
 ### Tasks
 
-- [ ] Add read-only endpoints/queries consumed by Reconciliation: balances,
+- [x] Add read-only endpoints/queries consumed by Reconciliation: balances,
       entry streams, and the user-funds-liability vs user-custodial sum check.
-- [ ] Emit one event per committed posting to the Audit / Event Log
+- [x] Emit one event per committed posting to the Audit / Event Log
       (`AUDIT_EVENT_LOG_URL`) with posting id, entry ids, and hash chain head.
 - [ ] Add `tests/invariants.rs` covering: balanced postings, idempotency,
       hash-chain integrity, immutability, segregation of user vs operational
       funds, and serializable concurrency.
 - [ ] Wire `cargo test --test invariants -- --nocapture` in CI.
-- [ ] Enforce `cargo clippy -- -D warnings` and `cargo fmt --check` in CI.
-- [ ] Finalize the Dockerfile for release builds and verify the
+- [x] Enforce `cargo clippy -- -D warnings` and `cargo fmt --check` in CI.
+- [x] Finalize the Dockerfile for release builds and verify the
       `cargo build --release` image boots and passes healthcheck.
 - [ ] Confirm codecov reporting is wired for the invariants suite.
 

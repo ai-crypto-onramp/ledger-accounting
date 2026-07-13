@@ -17,6 +17,9 @@ jobs:
           components: llvm-tools-preview
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --all
       - run: cargo build --release
       - run: cargo llvm-cov --codecov --output-path codecov.json
       - name: Upload coverage to Codecov

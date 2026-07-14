@@ -20,6 +20,7 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --all
+      - run: cargo test --test invariants -- --nocapture
       - run: cargo build --release
       - run: cargo llvm-cov --codecov --output-path codecov.json
       - name: Upload coverage to Codecov

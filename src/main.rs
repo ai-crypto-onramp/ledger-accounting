@@ -1,10 +1,8 @@
-mod account;
-mod chart;
-mod handlers;
-mod posting;
-mod store;
-
-use store::Store;
+use ledger_accounting::config;
+use ledger_accounting::grpc;
+use ledger_accounting::handlers;
+use ledger_accounting::store::Store;
+use tonic::transport::Server as TonicServer;
 
 fn app() -> axum::Router {
     handlers::router(Store::new())
@@ -14,19 +12,78 @@ async fn serve(listener: tokio::net::TcpListener) {
     axum::serve(listener, app()).await.unwrap();
 }
 
+async fn run_grpc(store: Store, addr: std::net::SocketAddr) {
+    let caller = std::env::var("ALLOWED_CALLERS")
+        .unwrap_or_else(|_| "transaction-orchestrator,treasury-orchestration".to_string());
+    let allowed_callers: Vec<String> = caller.split(',').map(|s| s.trim().to_string()).collect();
+    let svc = grpc::server(store, allowed_callers);
+    if let Err(e) = TonicServer::builder().add_service(svc).serve(addr).await {
+        eprintln!("[grpc] server error: {}", e);
+    }
+}
+
+async fn run_snapshot_task(store: Store) {
+    let cfg = config::Config::from_env();
+    let interval = cfg.snapshot_interval();
+    loop {
+        tokio::time::sleep(interval).await;
+        let snaps = store.write_snapshots();
+        eprintln!("[snapshot] wrote {} balance snapshots", snaps.len());
+    }
+}
+
+fn verify_chain_at_startup(store: &Store) {
+    match store.verify_chain() {
+        Ok(()) => {
+            eprintln!("[chain] verification passed at startup");
+        }
+        Err(b) => {
+            eprintln!(
+                "[chain] FATAL: hash chain broken at entry {}: {}",
+                b.entry_id, b.reason
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
+    let cfg = config::Config::from_env();
+    if let Err(e) = cfg.assert_isolation() {
+        eprintln!("[boot] {}", e);
+        std::process::exit(1);
+    }
+
+    let store = Store::new();
+    verify_chain_at_startup(&store);
+
+    let port = cfg.port;
+    let rest_addr: std::net::SocketAddr = ([0, 0, 0, 0], port).into();
+    let grpc_addr: std::net::SocketAddr = ([0, 0, 0, 0], port + 1).into();
+
+    let grpc_store = store.clone();
+    let snap_store = store.clone();
+    tokio::spawn(async move {
+        run_grpc(grpc_store, grpc_addr).await;
+    });
+    tokio::spawn(async move {
+        run_snapshot_task(snap_store).await;
+    });
+
+    let listener = tokio::net::TcpListener::bind(rest_addr).await.unwrap();
     serve(listener).await;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::posting::PostingRequest;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
+    use ledger_accounting::chart;
+    use ledger_accounting::posting::PostingRequest;
+    use ledger_accounting::store::Store;
     use serde_json::{json, Value};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tower::ServiceExt;
@@ -687,5 +744,211 @@ mod tests {
         assert_eq!(s2, StatusCode::OK);
         let e2 = v2["entries"].as_array().unwrap();
         assert_eq!(e2.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn unknown_asset_rejected() {
+        let router = app();
+        setup_two_accounts(&router).await;
+        let (status, val) = post_json(
+            &router,
+            "/v1/postings",
+            json!({
+                "posting_id": "unkasset",
+                "entries": [
+                    { "account_id": "uc", "direction": "debit", "amount": 10, "asset": "WOBBLE" },
+                    { "account_id": "op", "direction": "credit", "amount": 10, "asset": "WOBBLE" }
+                ]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(val["error"].as_str().unwrap().contains("unknown asset"));
+    }
+
+    #[tokio::test]
+    async fn hash_chain_anchor_and_global_head() {
+        let store = Store::new();
+        let _ = store
+            .create_account(
+                serde_json::from_value(create_account_body("uc", "user_custodial", "both"))
+                    .unwrap(),
+            )
+            .unwrap();
+        let _ = store
+            .create_account(
+                serde_json::from_value(create_account_body("op", "operational_fiat", "fiat"))
+                    .unwrap(),
+            )
+            .unwrap();
+        let req: PostingRequest = serde_json::from_value(balanced_posting_body("anchor1")).unwrap();
+        let (resp, _) = store.post(req).unwrap();
+        let anchor = store.hash_chain_anchor("anchor1").unwrap();
+        assert_eq!(anchor.head_hash, resp.hash_head);
+        assert_eq!(store.global_chain_head(), resp.hash_head);
+    }
+
+    #[tokio::test]
+    async fn verify_chain_passes_clean_db() {
+        let store = Store::new();
+        assert!(store.verify_chain().is_ok());
+    }
+
+    #[tokio::test]
+    async fn verify_chain_detects_tamper() {
+        let store = Store::new();
+        let _ = store
+            .create_account(
+                serde_json::from_value(create_account_body("uc", "user_custodial", "both"))
+                    .unwrap(),
+            )
+            .unwrap();
+        let _ = store
+            .create_account(
+                serde_json::from_value(create_account_body("op", "operational_fiat", "fiat"))
+                    .unwrap(),
+            )
+            .unwrap();
+        let req: PostingRequest = serde_json::from_value(balanced_posting_body("tamper1")).unwrap();
+        store.post(req).unwrap();
+        {
+            let mut state = store.inner.lock();
+            state.entries[0].this_hash = "deadbeef".to_string();
+        }
+        assert!(store.verify_chain().is_err());
+    }
+
+    #[tokio::test]
+    async fn user_custodial_sum_matches_entries() {
+        let store = Store::new();
+        let _ = store
+            .create_account(
+                serde_json::from_value(create_account_body("uc1", "user_custodial", "both"))
+                    .unwrap(),
+            )
+            .unwrap();
+        let _ = store
+            .create_account(
+                serde_json::from_value(create_account_body("uc2", "user_custodial", "both"))
+                    .unwrap(),
+            )
+            .unwrap();
+        let _ = store
+            .create_account(
+                serde_json::from_value(create_account_body("op", "operational_fiat", "fiat"))
+                    .unwrap(),
+            )
+            .unwrap();
+        let _ = store.post(
+            serde_json::from_value(json!({
+                "posting_id": "ucs1",
+                "entries": [
+                    { "account_id": "uc1", "direction": "debit", "amount": 70, "asset": "USD" },
+                    { "account_id": "op", "direction": "credit", "amount": 70, "asset": "USD" }
+                ]
+            }))
+            .unwrap(),
+        );
+        let _ = store.post(
+            serde_json::from_value(json!({
+                "posting_id": "ucs2",
+                "entries": [
+                    { "account_id": "uc2", "direction": "debit", "amount": 30, "asset": "USD" },
+                    { "account_id": "op", "direction": "credit", "amount": 30, "asset": "USD" }
+                ]
+            }))
+            .unwrap(),
+        );
+        let sum = store.user_custodial_sum("USD");
+        assert_eq!(sum, 100);
+    }
+
+    #[tokio::test]
+    async fn snapshot_write_and_reconcile() {
+        let store = Store::new();
+        let _ = store
+            .create_account(
+                serde_json::from_value(create_account_body("uc", "user_custodial", "both"))
+                    .unwrap(),
+            )
+            .unwrap();
+        let _ = store
+            .create_account(
+                serde_json::from_value(create_account_body("op", "operational_fiat", "fiat"))
+                    .unwrap(),
+            )
+            .unwrap();
+        let _ = store
+            .post(serde_json::from_value(balanced_posting_body("snap1")).unwrap())
+            .unwrap();
+        let snaps = store.write_snapshots();
+        assert!(!snaps.is_empty());
+        for s in &snaps {
+            assert!(store.reconcile_snapshot(s), "snapshot mismatch: {:?}", s);
+        }
+    }
+
+    #[tokio::test]
+    async fn balance_via_snapshot_matches_direct() {
+        let store = Store::new();
+        let _ = store
+            .create_account(
+                serde_json::from_value(create_account_body("uc", "user_custodial", "both"))
+                    .unwrap(),
+            )
+            .unwrap();
+        let _ = store
+            .create_account(
+                serde_json::from_value(create_account_body("op", "operational_fiat", "fiat"))
+                    .unwrap(),
+            )
+            .unwrap();
+        let _ = store
+            .post(serde_json::from_value(balanced_posting_body("bsnap1")).unwrap())
+            .unwrap();
+        store.write_snapshots();
+        let _ = store
+            .post(serde_json::from_value(balanced_posting_body("bsnap2")).unwrap())
+            .unwrap();
+        let direct = store.balance("uc", "USD").unwrap();
+        let via = store.balance_via_snapshot("uc", "USD").unwrap();
+        assert_eq!(direct, via);
+    }
+
+    #[tokio::test]
+    async fn fx_posting_routes_gain_to_fx_gain_loss() {
+        let store = Store::new();
+        let _ = store
+            .create_account(
+                serde_json::from_value(create_account_body("opf", "operational_fiat", "fiat"))
+                    .unwrap(),
+            )
+            .unwrap();
+        let _ = store
+            .create_account(
+                serde_json::from_value(create_account_body("vs", "venue_settlement", "both"))
+                    .unwrap(),
+            )
+            .unwrap();
+        let _ = store
+            .create_account(
+                serde_json::from_value(create_account_body("fx", "fx_gain_loss", "both")).unwrap(),
+            )
+            .unwrap();
+        let _ = store.post(
+            serde_json::from_value(json!({
+                "posting_id": "fx1",
+                "entries": [
+                    { "account_id": "vs", "direction": "debit", "amount": 50, "asset": "BTC" },
+                    { "account_id": "opf", "direction": "credit", "amount": 50, "asset": "BTC" },
+                    { "account_id": "opf", "direction": "debit", "amount": 105, "asset": "USD" },
+                    { "account_id": "vs", "direction": "credit", "amount": 100, "asset": "USD" },
+                    { "account_id": "fx", "direction": "credit", "amount": 5, "asset": "USD" }
+                ]
+            }))
+            .unwrap(),
+        );
+        let fx_bal = store.balance("fx", "USD").unwrap();
+        assert_eq!(fx_bal, -5);
     }
 }

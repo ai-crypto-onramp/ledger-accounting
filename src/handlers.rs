@@ -11,13 +11,18 @@ use crate::store::{LedgerPage, Store};
 
 pub fn router(store: Store) -> axum::Router {
     axum::Router::new()
+        .merge(read_router(store.clone()))
+        .merge(write_router(store))
+}
+
+pub fn read_router(store: Store) -> axum::Router {
+    axum::Router::new()
         .route("/healthz", axum::routing::get(healthz))
         .route("/readyz", axum::routing::get(readyz))
         .route(
             "/v1/chart-of-accounts",
             axum::routing::get(chart_of_accounts),
         )
-        .route("/v1/accounts", axum::routing::post(create_account))
         .route(
             "/v1/accounts/:id/balance",
             axum::routing::get(account_balance),
@@ -26,8 +31,19 @@ pub fn router(store: Store) -> axum::Router {
             "/v1/accounts/:id/ledger",
             axum::routing::get(account_ledger),
         )
-        .route("/v1/postings", axum::routing::post(create_posting))
         .route("/v1/postings/:id", axum::routing::get(get_posting))
+        .route(
+            "/v1/reconciliation/user-custodial-sum",
+            axum::routing::get(user_custodial_sum),
+        )
+        .route("/v1/chain/verify", axum::routing::get(verify_chain))
+        .with_state(store)
+}
+
+pub fn write_router(store: Store) -> axum::Router {
+    axum::Router::new()
+        .route("/v1/accounts", axum::routing::post(create_account))
+        .route("/v1/postings", axum::routing::post(create_posting))
         .with_state(store)
 }
 
@@ -154,5 +170,33 @@ async fn get_posting(
             StatusCode::NOT_FOUND,
             Json(json!({ "error": format!("posting not found: {}", id) })),
         )),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct UserCustodialQuery {
+    asset: Option<String>,
+}
+
+async fn user_custodial_sum(
+    State(store): State<Store>,
+    Query(q): Query<UserCustodialQuery>,
+) -> Json<Value> {
+    let asset = q.asset.unwrap_or_default();
+    let sum = store.user_custodial_sum(&asset);
+    Json(json!({
+        "asset": if asset.is_empty() { "all" } else { &asset },
+        "user_custodial_sum": sum.to_string(),
+    }))
+}
+
+async fn verify_chain(State(store): State<Store>) -> Json<Value> {
+    match store.verify_chain() {
+        Ok(()) => Json(json!({ "ok": true })),
+        Err(b) => Json(json!({
+            "ok": false,
+            "entry_id": b.entry_id,
+            "reason": b.reason,
+        })),
     }
 }

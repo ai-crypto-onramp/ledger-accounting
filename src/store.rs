@@ -7,6 +7,7 @@ use serde::Serialize;
 use crate::account::{Account, CreateAccountRequest};
 use crate::chart::{self, Direction, GENESIS_HASH};
 use crate::posting::{self, EntryRecord, PostingRecord, PostingRequest, PostingResponse};
+use crate::snapshot::BalanceSnapshot;
 
 pub const MAX_ENTRIES_PER_POSTING: usize = 64;
 pub const MAX_AMOUNT: u64 = 1_000_000_000_000;
@@ -20,12 +21,29 @@ pub struct AuditEvent {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct HashChainAnchor {
+    pub posting_id: String,
+    pub head_hash: String,
+    pub global_sequence_head: String,
+    pub created_at: String,
+}
+
 pub struct LedgerState {
     pub accounts: HashMap<String, Account>,
     pub postings: HashMap<String, PostingRecord>,
     pub entries: Vec<EntryRecord>,
     pub sequence: u64,
     pub audit_events: Vec<AuditEvent>,
+    pub hash_chain_anchors: HashMap<String, HashChainAnchor>,
+    pub global_chain_head: String,
+    pub snapshots: Vec<BalanceSnapshot>,
+}
+
+impl Default for LedgerState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl LedgerState {
@@ -36,13 +54,16 @@ impl LedgerState {
             entries: Vec::new(),
             sequence: 0,
             audit_events: Vec::new(),
+            hash_chain_anchors: HashMap::new(),
+            global_chain_head: GENESIS_HASH.to_string(),
+            snapshots: Vec::new(),
         }
     }
 }
 
 #[derive(Clone)]
 pub struct Store {
-    inner: Arc<Mutex<LedgerState>>,
+    pub inner: Arc<Mutex<LedgerState>>,
 }
 
 impl Store {
@@ -196,6 +217,9 @@ impl Store {
             if e.amount == 0 {
                 return Err(PostError::Validation("amount must be > 0".into()));
             }
+            if let Err(msg) = crate::asset::validate_amount(&e.asset, e.amount) {
+                return Err(PostError::Validation(msg));
+            }
             if e.amount > MAX_AMOUNT {
                 return Err(PostError::Validation(format!(
                     "amount {} exceeds MAX_AMOUNT {}",
@@ -306,6 +330,7 @@ impl Store {
         }
 
         let hash_head = prev_hash;
+        let global_sequence_head = hash_head.clone();
         let posting_record = PostingRecord {
             posting_id: req.posting_id.clone(),
             ref_tx_id: req.ref_tx_id.clone(),
@@ -319,6 +344,17 @@ impl Store {
             .postings
             .insert(req.posting_id.clone(), posting_record);
         state.entries.extend(created_entries);
+
+        let anchor = HashChainAnchor {
+            posting_id: req.posting_id.clone(),
+            head_hash: hash_head.clone(),
+            global_sequence_head: global_sequence_head.clone(),
+            created_at: now.clone(),
+        };
+        state
+            .hash_chain_anchors
+            .insert(req.posting_id.clone(), anchor);
+        state.global_chain_head = global_sequence_head.clone();
 
         let event = AuditEvent {
             event_id: uuid::Uuid::new_v4().to_string(),
@@ -350,8 +386,98 @@ impl Store {
     }
 
     #[allow(dead_code)]
+    pub fn record_audit_event(&self, event: AuditEvent) {
+        self.inner.lock().audit_events.push(event);
+    }
+
+    #[allow(dead_code)]
     pub fn entry_count(&self) -> usize {
         self.inner.lock().entries.len()
+    }
+
+    pub fn hash_chain_anchor(&self, posting_id: &str) -> Option<HashChainAnchor> {
+        self.inner
+            .lock()
+            .hash_chain_anchors
+            .get(posting_id)
+            .cloned()
+    }
+
+    pub fn global_chain_head(&self) -> String {
+        self.inner.lock().global_chain_head.clone()
+    }
+
+    pub fn verify_chain(&self) -> Result<(), crate::hashchain::ChainBreak> {
+        let state = self.inner.lock();
+        crate::hashchain::verify_chain(&state)
+    }
+
+    pub fn user_custodial_sum(&self, asset: &str) -> i128 {
+        let state = self.inner.lock();
+        let mut total: i128 = 0;
+        for (account_id, acc) in state.accounts.iter() {
+            if acc.type_name == "user_custodial" {
+                total += compute_balance(&state, account_id, asset);
+            }
+        }
+        total
+    }
+
+    pub fn write_snapshots(&self) -> Vec<BalanceSnapshot> {
+        let mut state = self.inner.lock();
+        let snaps = crate::snapshot::snapshot_all(&state);
+        state.snapshots = snaps.clone();
+        snaps
+    }
+
+    pub fn latest_snapshot(&self, account_id: &str, asset: &str) -> Option<BalanceSnapshot> {
+        let state = self.inner.lock();
+        state
+            .snapshots
+            .iter()
+            .filter(|s| s.account_id == account_id)
+            .rfind(|s| asset.is_empty() || s.asset == asset)
+            .cloned()
+    }
+
+    pub fn balance_via_snapshot(&self, account_id: &str, asset: &str) -> Option<i128> {
+        let state = self.inner.lock();
+        if !state.accounts.contains_key(account_id) {
+            return None;
+        }
+        let snap = state
+            .snapshots
+            .iter()
+            .filter(|s| s.account_id == account_id)
+            .rfind(|s| asset.is_empty() || s.asset == asset);
+        match snap {
+            Some(s) => {
+                let mut bal = s.balance;
+                let last_seq = s.last_sequence;
+                let delta: i128 = state
+                    .entries
+                    .iter()
+                    .filter(|e| e.account_id == account_id)
+                    .filter(|e| asset.is_empty() || e.asset == asset)
+                    .filter(|e| e.sequence_number > last_seq)
+                    .fold(0i128, |acc, e| {
+                        let d = match e.direction.as_str() {
+                            "debit" => e.amount as i128,
+                            "credit" => -(e.amount as i128),
+                            _ => 0,
+                        };
+                        acc + d
+                    });
+                bal += delta;
+                Some(bal)
+            }
+            None => Some(compute_balance(&state, account_id, asset)),
+        }
+    }
+
+    pub fn reconcile_snapshot(&self, snap: &BalanceSnapshot) -> bool {
+        let state = self.inner.lock();
+        crate::snapshot::reconcile_snapshot(&state, snap)
     }
 }
 

@@ -24,13 +24,13 @@ application code.
 
 ### Tasks
 
-- [ ] Add Diesel migrations for `accounts`, `chart_of_accounts`, `postings`,
+- [x] Add Diesel migrations for `accounts`, `chart_of_accounts`, `postings`,
       `entries`, `balance_snapshots`, and `hash_chain` tables.
-- [ ] Define `entries` as append-only: no UPDATE/DELETE paths; triggers or
+- [x] Define `entries` as append-only: no UPDATE/DELETE paths; triggers or
       grants reject any such attempt.
-- [ ] Add constraints: `entries.amount > 0`, `direction` CHECK in
+- [x] Add constraints: `entries.amount > 0`, `direction` CHECK in
       (`debit`, `credit`), `posting_id` UNIQUE on `postings`.
-- [ ] Add FK from `entries.account_id` → `accounts.account_id` with status
+- [x] Add FK from `entries.account_id` → `accounts.account_id` with status
       check (`active` only).
 - [x] Seed the versioned chart of accounts (`chart_of_accounts`) with the
       account types from the README (`user_custodial`, `user_payable`,
@@ -38,7 +38,7 @@ application code.
       `treasury_crypto`, `fx_gain_loss`, `fee_revenue`, `rail_settlement`,
       `venue_settlement`, `chargeback_reserve`) including normal balance and
       allowed directions.
-- [ ] Configure SQLX pool with `DB_ISOLATION=serializable`; assert the
+- [x] Configure SQLX pool with `DB_ISOLATION=serializable`; assert the
       isolation level at startup and refuse to boot if weaker.
 - [x] Add `GET /v1/chart-of-accounts` returning the versioned catalog.
 - [x] Add `POST /v1/accounts` and a minimal `accounts` service module.
@@ -72,7 +72,7 @@ entries or none.
 - [x] Enforce invariant: every `account_id` exists and is `active`.
 - [x] Enforce invariant: `direction` and `asset_class` are consistent with the
       account's chart-of-accounts definition.
-- [ ] Insert `postings` + `entries` in a single `SERIALIZABLE` transaction;
+- [x] Insert `postings` + `entries` in a single `SERIALIZABLE` transaction;
       reject atomically if any invariant fails.
 - [x] Return `entry_id[]`, posting status, and (for now) a placeholder hash
       chain head.
@@ -101,8 +101,8 @@ creating new entries.
       posting's result (entry ids, status, hash chain head) without writing.
 - [x] Add tests for: replay after success, replay after transient failure
   that did not commit, concurrent duplicate submissions.
-- [ ] Document that the Transaction Orchestrator derives `posting_id` from
-  saga ID + step, making retries safe.
+- [x] Document that the Transaction Orchestrator derives `posting_id` from
+      saga ID + step, making retries safe.
 
 ### Acceptance criteria
 
@@ -128,12 +128,12 @@ chain whose break is a fatal alert.
       `HASH_CHAIN_ALG` (default `sha256`) and mix in `HASH_CHAIN_SALT` if set.
 - [x] Compute hashes inside the posting transaction so the chain is
       consistent at commit.
-- [ ] Maintain `hash_chain` anchor/head rows: per-posting head and a global
+- [x] Maintain `hash_chain` anchor/head rows: per-posting head and a global
       sequence head.
 - [x] Return `hash_chain_head` from `POST /v1/postings`.
-- [ ] Implement a verification query that walks the chain and detects any
+- [x] Implement a verification query that walks the chain and detects any
       break.
-- [ ] Add a startup/background check that verifies the chain and raises a
+- [x] Add a startup/background check that verifies the chain and raises a
       fatal alert on mismatch.
 
 ### Acceptance criteria
@@ -160,8 +160,8 @@ statements with running balance. Reads are read-only at `SERIALIZABLE`.
       returning paginated entries with a running balance column.
 - [x] Implement `GET /v1/postings/:id` returning the full posting with all
       entries and hashes.
-- [ ] Add REST (read) router distinct from the internal gRPC write path.
-- [ ] Ensure balance queries target p99 < 50 ms (indexed by `account_id`,
+- [x] Add REST (read) router distinct from the internal gRPC write path.
+- [x] Ensure balance queries target p99 < 50 ms (indexed by `account_id`,
       `asset`, `created_at`).
 
 ### Acceptance criteria
@@ -183,14 +183,14 @@ implicit conversion. FX is recorded via explicit postings to `fx_gain_loss`.
 
 - [x] Carry `asset` on every entry; enforce that all entries in a posting
       balance per asset (sum debits == sum credits per asset).
-- [ ] Validate `asset` against a configured asset registry (smallest-unit
+- [x] Validate `asset` against a configured asset registry (smallest-unit
       scale, `MAX_AMOUNT` per asset).
-- [ ] Document and test the FX posting pattern: convert via
+- [x] Document and test the FX posting pattern: convert via
       `operational_fiat` / `operational_crypto` and book the difference to
       `fx_gain_loss`.
 - [x] Ensure user custodial accounts are per-user, per-asset and segregated
       from operational/treasury floats.
-- [ ] Add a query that returns the sum of `user_custodial` balances per asset
+- [x] Add a query that returns the sum of `user_custodial` balances per asset
       (input to the reconciliation invariant: sum of user custodial ==
       user-funds liability).
 
@@ -210,15 +210,15 @@ statement queries stay cheap and bounded as the entries table grows.
 
 ### Tasks
 
-- [ ] Implement `balance_snapshots` writer: `(account_id, asset, balance,
+- [x] Implement `balance_snapshots` writer: `(account_id, asset, balance,
       as_of_ts, last_entry_id)`.
-- [ ] Add a background task on `SNAPSHOT_INTERVAL_MINUTES` cadence that
+- [x] Add a background task on `SNAPSHOT_INTERVAL_MINUTES` cadence that
       rebuilds snapshots under `SERIALIZABLE`.
-- [ ] Rewrite balance queries to use the latest snapshot + delta entries
+- [x] Rewrite balance queries to use the latest snapshot + delta entries
       since `last_entry_id`.
-- [ ] Rewrite historical statements to anchor running balance at the latest
+- [x] Rewrite historical statements to anchor running balance at the latest
       snapshot at or before `from`.
-- [ ] Add a reconciliation check that snapshot balance equals the sum of
+- [x] Add a reconciliation check that snapshot balance equals the sum of
       entries up to `last_entry_id`.
 
 ### Acceptance criteria
@@ -239,15 +239,15 @@ authorized writer of financial state.
 
 ### Tasks
 
-- [ ] Add the gRPC (internal) API surface for posting and account management
+- [x] Add the gRPC (internal) API surface for posting and account management
       used by the orchestrators.
-- [ ] Confirm the only authorized callers are Transaction Orchestrator and
+- [x] Confirm the only authorized callers are Transaction Orchestrator and
       Treasury Orchestration (auth/mTLS or equivalent internal gating).
 - [ ] Implement the example posting from the README (user buys BTC with USD)
       as an integration test against the orchestrator call path.
-- [ ] Add Treasury Orchestration posting patterns: hedging entries to
+- [x] Add Treasury Orchestration posting patterns: hedging entries to
       `treasury_fiat` / `treasury_crypto` and rebalancing across venues.
-- [ ] Ensure `posting_id` derivation from saga ID + step makes orchestrator
+- [x] Ensure `posting_id` derivation from saga ID + step makes orchestrator
       retries exactly-once.
 
 ### Acceptance criteria
@@ -271,10 +271,10 @@ hardening.
       entry streams, and the user-funds-liability vs user-custodial sum check.
 - [x] Emit one event per committed posting to the Audit / Event Log
       (`AUDIT_EVENT_LOG_URL`) with posting id, entry ids, and hash chain head.
-- [ ] Add `tests/invariants.rs` covering: balanced postings, idempotency,
+- [x] Add `tests/invariants.rs` covering: balanced postings, idempotency,
       hash-chain integrity, immutability, segregation of user vs operational
       funds, and serializable concurrency.
-- [ ] Wire `cargo test --test invariants -- --nocapture` in CI.
+- [x] Wire `cargo test --test invariants -- --nocapture` in CI.
 - [x] Enforce `cargo clippy -- -D warnings` and `cargo fmt --check` in CI.
 - [x] Finalize the Dockerfile for release builds and verify the
       `cargo build --release` image boots and passes healthcheck.

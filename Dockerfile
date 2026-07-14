@@ -1,6 +1,7 @@
 FROM rust:1.85 AS builder
 WORKDIR /src
 COPY . .
+RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler && rm -rf /var/lib/apt/lists/*
 RUN cargo build --release
 
 FROM debian:bookworm-slim

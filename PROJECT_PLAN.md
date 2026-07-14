@@ -278,7 +278,7 @@ hardening.
 - [x] Enforce `cargo clippy -- -D warnings` and `cargo fmt --check` in CI.
 - [x] Finalize the Dockerfile for release builds and verify the
       `cargo build --release` image boots and passes healthcheck.
-- [ ] Confirm codecov reporting is wired for the invariants suite.
+- [x] Confirm codecov reporting is wired for the invariants suite.
 
 ### Acceptance criteria
 

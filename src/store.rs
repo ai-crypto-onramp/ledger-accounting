@@ -341,7 +341,11 @@ impl Store {
             .filter(|a| type_filter.is_none_or(|t| a.type_name == t))
             .cloned()
             .collect();
-        out.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.account_id.cmp(&b.account_id)));
+        out.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.account_id.cmp(&b.account_id))
+        });
         out
     }
 
@@ -349,7 +353,11 @@ impl Store {
         let state = self.inner.lock();
         let limit = limit.clamp(1, 200);
         let mut out: Vec<PostingRecord> = state.postings.values().cloned().collect();
-        out.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.posting_id.cmp(&b.posting_id)));
+        out.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.posting_id.cmp(&b.posting_id))
+        });
         out.truncate(limit);
         out
     }

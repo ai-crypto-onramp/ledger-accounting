@@ -4,9 +4,9 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::account::{AccountResponse, CreateAccountRequest};
+use crate::account::{Account, AccountResponse, CreateAccountRequest};
 use crate::chart::{CHART, GENESIS_HASH};
-use crate::posting::PostingRequest;
+use crate::posting::{PostingRecord, PostingRequest};
 use crate::store::{LedgerPage, Store};
 
 pub fn router(store: Store) -> axum::Router {
@@ -23,6 +23,7 @@ pub fn read_router(store: Store) -> axum::Router {
             "/v1/chart-of-accounts",
             axum::routing::get(chart_of_accounts),
         )
+        .route("/v1/accounts", axum::routing::get(list_accounts))
         .route(
             "/v1/accounts/:id/balance",
             axum::routing::get(account_balance),
@@ -31,6 +32,7 @@ pub fn read_router(store: Store) -> axum::Router {
             "/v1/accounts/:id/ledger",
             axum::routing::get(account_ledger),
         )
+        .route("/v1/postings", axum::routing::get(list_postings))
         .route("/v1/postings/:id", axum::routing::get(get_posting))
         .route(
             "/v1/reconciliation/user-custodial-sum",
@@ -61,6 +63,33 @@ async fn chart_of_accounts(State(_store): State<Store>) -> Json<Value> {
         "genesis_hash": GENESIS_HASH,
         "account_types": CHART,
     }))
+}
+
+#[derive(Debug, Deserialize)]
+struct ListAccountsQuery {
+    #[serde(rename = "type")]
+    type_filter: Option<String>,
+}
+
+async fn list_accounts(
+    State(store): State<Store>,
+    Query(q): Query<ListAccountsQuery>,
+) -> Json<Value> {
+    let accounts: Vec<Account> = store.list_accounts(q.type_filter.as_deref());
+    Json(json!({ "accounts": accounts }))
+}
+
+#[derive(Debug, Deserialize)]
+struct ListPostingsQuery {
+    limit: Option<usize>,
+}
+
+async fn list_postings(
+    State(store): State<Store>,
+    Query(q): Query<ListPostingsQuery>,
+) -> Json<Value> {
+    let postings: Vec<PostingRecord> = store.list_postings(q.limit.unwrap_or(50));
+    Json(json!({ "postings": postings }))
 }
 
 async fn create_account(

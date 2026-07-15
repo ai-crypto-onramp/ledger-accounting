@@ -977,4 +977,55 @@ mod tests {
         let fx_bal = store.balance("fx", "USD").unwrap();
         assert_eq!(fx_bal, -5);
     }
+
+    #[tokio::test]
+    async fn list_accounts_returns_all() {
+        let router = app();
+        setup_two_accounts(&router).await;
+        let (status, val) = get_json(&router, "/v1/accounts").await;
+        assert_eq!(status, StatusCode::OK);
+        let accounts = val["accounts"].as_array().unwrap();
+        assert_eq!(accounts.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn list_accounts_filters_by_type() {
+        let router = app();
+        setup_two_accounts(&router).await;
+        let (status, val) = get_json(&router, "/v1/accounts?type=user_custodial").await;
+        assert_eq!(status, StatusCode::OK);
+        let accounts = val["accounts"].as_array().unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0]["type"], "user_custodial");
+    }
+
+    #[tokio::test]
+    async fn list_postings_returns_all() {
+        let router = app();
+        setup_two_accounts(&router).await;
+        let _ = post_json(&router, "/v1/postings", balanced_posting_body("lp1")).await;
+        let _ = post_json(&router, "/v1/postings", balanced_posting_body("lp2")).await;
+        let (status, val) = get_json(&router, "/v1/postings").await;
+        assert_eq!(status, StatusCode::OK);
+        let postings = val["postings"].as_array().unwrap();
+        assert_eq!(postings.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn list_postings_respects_limit() {
+        let router = app();
+        setup_two_accounts(&router).await;
+        for i in 0..3 {
+            let _ = post_json(
+                &router,
+                "/v1/postings",
+                balanced_posting_body(&format!("lplim{}", i)),
+            )
+            .await;
+        }
+        let (status, val) = get_json(&router, "/v1/postings?limit=2").await;
+        assert_eq!(status, StatusCode::OK);
+        let postings = val["postings"].as_array().unwrap();
+        assert_eq!(postings.len(), 2);
+    }
 }

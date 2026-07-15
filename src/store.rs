@@ -333,6 +333,27 @@ impl Store {
         self.inner.lock().accounts.get(account_id).cloned()
     }
 
+    pub fn list_accounts(&self, type_filter: Option<&str>) -> Vec<Account> {
+        let state = self.inner.lock();
+        let mut out: Vec<Account> = state
+            .accounts
+            .values()
+            .filter(|a| type_filter.is_none_or(|t| a.type_name == t))
+            .cloned()
+            .collect();
+        out.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.account_id.cmp(&b.account_id)));
+        out
+    }
+
+    pub fn list_postings(&self, limit: usize) -> Vec<PostingRecord> {
+        let state = self.inner.lock();
+        let limit = limit.clamp(1, 200);
+        let mut out: Vec<PostingRecord> = state.postings.values().cloned().collect();
+        out.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.posting_id.cmp(&b.posting_id)));
+        out.truncate(limit);
+        out
+    }
+
     pub fn balance(&self, account_id: &str, asset: &str) -> Option<i128> {
         let state = self.inner.lock();
         if !state.accounts.contains_key(account_id) {

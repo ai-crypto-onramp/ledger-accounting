@@ -1,4 +1,4 @@
-FROM rust:1.85 AS builder
+FROM rust:1.94 AS builder
 WORKDIR /src
 COPY . .
 RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler && rm -rf /var/lib/apt/lists/*

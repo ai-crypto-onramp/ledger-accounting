@@ -4,10 +4,12 @@ use ledger_accounting::handlers;
 use ledger_accounting::store::Store;
 use tonic::transport::Server as TonicServer;
 
+#[allow(dead_code)]
 fn app() -> axum::Router {
     handlers::router(Store::new())
 }
 
+#[allow(dead_code)]
 async fn serve(listener: tokio::net::TcpListener) {
     axum::serve(listener, app()).await.unwrap();
 }
@@ -55,7 +57,28 @@ async fn main() {
         std::process::exit(1);
     }
 
-    let store = Store::new();
+    let store = if cfg.db_url.is_empty() {
+        Store::new()
+    } else {
+        match Store::connect(&cfg.db_url).await {
+            Ok(s) => {
+                if let Err(e) = s.run_migrations().await {
+                    eprintln!("[boot] {}", e);
+                    std::process::exit(1);
+                }
+                if let Err(e) = s.hydrate().await {
+                    eprintln!("[boot] {}", e);
+                    std::process::exit(1);
+                }
+                eprintln!("[boot] connected to postgres at {}", cfg.db_url);
+                s
+            }
+            Err(e) => {
+                eprintln!("[boot] failed to connect to postgres: {}", e);
+                std::process::exit(1);
+            }
+        }
+    };
     verify_chain_at_startup(&store);
 
     let port = cfg.port;
@@ -64,6 +87,7 @@ async fn main() {
 
     let grpc_store = store.clone();
     let snap_store = store.clone();
+    let rest_store = store.clone();
     tokio::spawn(async move {
         run_grpc(grpc_store, grpc_addr).await;
     });
@@ -72,7 +96,9 @@ async fn main() {
     });
 
     let listener = tokio::net::TcpListener::bind(rest_addr).await.unwrap();
-    serve(listener).await;
+    axum::serve(listener, handlers::router(rest_store))
+        .await
+        .unwrap();
 }
 
 #[cfg(test)]

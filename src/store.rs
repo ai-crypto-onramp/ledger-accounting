@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use serde::Serialize;
+use sqlx::FromRow;
 
 use crate::account::{Account, CreateAccountRequest};
 use crate::chart::{self, Direction, GENESIS_HASH};
@@ -11,6 +12,11 @@ use crate::snapshot::BalanceSnapshot;
 
 pub const MAX_ENTRIES_PER_POSTING: usize = 64;
 pub const MAX_AMOUNT: u64 = 1_000_000_000_000;
+
+pub const MIGRATION_INIT_SCHEMA: &str =
+    include_str!("../migrations/20240101000001_init_schema.sql");
+pub const MIGRATION_SET_SERIALIZABLE: &str =
+    include_str!("../migrations/20240101000002_set_serializable.sql");
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AuditEvent {
@@ -64,13 +70,206 @@ impl LedgerState {
 #[derive(Clone)]
 pub struct Store {
     pub inner: Arc<Mutex<LedgerState>>,
+    pub pool: Option<sqlx::PgPool>,
 }
 
 impl Store {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(LedgerState::new())),
+            pool: None,
         }
+    }
+
+    pub fn with_pool(pool: sqlx::PgPool) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(LedgerState::new())),
+            pool: Some(pool),
+        }
+    }
+
+    pub async fn connect(db_url: &str) -> Result<Self, sqlx::Error> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(16)
+            .connect(db_url)
+            .await?;
+        Ok(Self::with_pool(pool))
+    }
+
+    pub async fn run_migrations(&self) -> Result<(), String> {
+        let pool = match &self.pool {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+        if let Err(e) = sqlx::raw_sql(MIGRATION_INIT_SCHEMA).execute(pool).await {
+            if is_already_applied(&e) {
+                return Ok(());
+            }
+            return Err(format!("migration init_schema failed: {}", e));
+        }
+        if let Err(e) = sqlx::raw_sql(MIGRATION_SET_SERIALIZABLE)
+            .execute(pool)
+            .await
+        {
+            if is_already_applied(&e) {
+                return Ok(());
+            }
+            return Err(format!("migration set_serializable failed: {}", e));
+        }
+        Ok(())
+    }
+
+    pub async fn hydrate(&self) -> Result<(), String> {
+        let pool = match &self.pool {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+        let mut state = self.inner.lock();
+        state.accounts.clear();
+        state.postings.clear();
+        state.entries.clear();
+        state.hash_chain_anchors.clear();
+        state.snapshots.clear();
+        state.sequence = 0;
+        state.global_chain_head = GENESIS_HASH.to_string();
+
+        let accounts: Vec<AccountRow> = sqlx::query_as::<_, AccountRow>(
+            "SELECT account_id, type_name AS type_field, asset_class, label, parent_id, status, floor(extract(epoch from created_at))::bigint::text AS created_at FROM accounts ORDER BY created_at",
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("hydrate accounts failed: {}", e))?;
+        for a in accounts {
+            state.accounts.insert(
+                a.account_id.clone(),
+                Account {
+                    account_id: a.account_id,
+                    type_name: a.type_field,
+                    asset_class: a.asset_class,
+                    label: a.label,
+                    parent_id: a.parent_id,
+                    status: a.status,
+                    created_at: a.created_at,
+                },
+            );
+        }
+
+        let entries: Vec<EntryRow> = sqlx::query_as::<_, EntryRow>(
+            "SELECT entry_id, posting_id, account_id, direction, amount::text AS amount, asset, sequence_number, prev_hash, this_hash, floor(extract(epoch from created_at))::bigint::text AS created_at FROM entries ORDER BY sequence_number",
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("hydrate entries failed: {}", e))?;
+        let mut by_posting: std::collections::HashMap<String, Vec<EntryRecord>> =
+            std::collections::HashMap::new();
+        for e in entries {
+            let amount: u64 = e
+                .amount
+                .parse()
+                .map_err(|_| "hydrate: invalid amount".to_string())?;
+            let record = EntryRecord {
+                entry_id: e.entry_id,
+                posting_id: e.posting_id.clone(),
+                account_id: e.account_id,
+                direction: e.direction,
+                amount,
+                asset: e.asset,
+                sequence_number: e.sequence_number as u64,
+                prev_hash: e.prev_hash,
+                this_hash: e.this_hash,
+                created_at: e.created_at,
+            };
+            if record.sequence_number > state.sequence {
+                state.sequence = record.sequence_number;
+            }
+            by_posting
+                .entry(record.posting_id.clone())
+                .or_default()
+                .push(record.clone());
+            state.entries.push(record);
+        }
+        state.global_chain_head = state
+            .entries
+            .last()
+            .map(|e| e.this_hash.clone())
+            .unwrap_or_else(|| GENESIS_HASH.to_string());
+
+        let postings: Vec<PostingRow> = sqlx::query_as::<_, PostingRow>(
+            "SELECT posting_id, ref_tx_id, memo, status, hash_chain_head, floor(extract(epoch from created_at))::bigint::text AS created_at FROM postings ORDER BY created_at",
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("hydrate postings failed: {}", e))?;
+        for p in postings {
+            let entries = by_posting.remove(&p.posting_id).unwrap_or_default();
+            state.postings.insert(
+                p.posting_id.clone(),
+                PostingRecord {
+                    posting_id: p.posting_id,
+                    ref_tx_id: p.ref_tx_id,
+                    memo: p.memo,
+                    status: p.status,
+                    hash_head: p.hash_chain_head,
+                    entries,
+                    created_at: p.created_at,
+                },
+            );
+        }
+
+        let anchors: Vec<AnchorRow> = sqlx::query_as::<_, AnchorRow>(
+            "SELECT posting_id, head_hash, global_sequence_head, floor(extract(epoch from created_at))::bigint::text AS created_at FROM hash_chain",
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("hydrate anchors failed: {}", e))?;
+        for a in anchors {
+            state.hash_chain_anchors.insert(
+                a.posting_id.clone(),
+                HashChainAnchor {
+                    posting_id: a.posting_id,
+                    head_hash: a.head_hash,
+                    global_sequence_head: a.global_sequence_head,
+                    created_at: a.created_at,
+                },
+            );
+        }
+
+        let snapshots: Vec<SnapshotRow> = sqlx::query_as::<_, SnapshotRow>(
+            "SELECT account_id, asset, balance::text AS balance, floor(extract(epoch from as_of_ts))::bigint::text AS as_of_ts, last_entry_id FROM balance_snapshots",
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("hydrate snapshots failed: {}", e))?;
+        for s in snapshots {
+            let balance: i128 = s
+                .balance
+                .parse()
+                .map_err(|_| "hydrate: invalid snapshot balance".to_string())?;
+            let row: (String,) = sqlx::query_as("SELECT entry_id FROM entries WHERE entry_id = $1")
+                .bind(&s.last_entry_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| format!("hydrate snapshot last_entry lookup failed: {}", e))?
+                .unwrap_or_default();
+            let last_entry_id = row.0;
+            let last_sequence: (i64,) =
+                sqlx::query_as("SELECT sequence_number FROM entries WHERE entry_id = $1")
+                    .bind(&s.last_entry_id)
+                    .fetch_optional(pool)
+                    .await
+                    .map_err(|e| format!("hydrate snapshot last_seq lookup failed: {}", e))?
+                    .unwrap_or((0,));
+            state.snapshots.push(BalanceSnapshot {
+                account_id: s.account_id,
+                asset: s.asset,
+                balance,
+                as_of_ts: s.as_of_ts,
+                last_entry_id,
+                last_sequence: last_sequence.0 as u64,
+            });
+        }
+
+        Ok(())
     }
 
     pub fn create_account(&self, req: CreateAccountRequest) -> Result<Account, String> {
@@ -98,6 +297,29 @@ impl Store {
             created_at: now,
         };
         state.accounts.insert(account_id, account.clone());
+        drop(state);
+
+        if let Some(pool) = &self.pool {
+            let mut tx =
+                block_on(pool.begin()).map_err(|e| format!("create_account: begin tx: {}", e))?;
+            block_on(
+                sqlx::query(
+                    "INSERT INTO accounts (account_id, type_name, asset_class, label, parent_id, status, created_at)
+                 VALUES ($1, $2, $3, $4, $5, 'active', to_timestamp($6))
+                 ON CONFLICT (account_id) DO NOTHING",
+                )
+                .bind(&account.account_id)
+                .bind(&account.type_name)
+                .bind(&account.asset_class)
+                .bind(&account.label)
+                .bind(account.parent_id.as_ref())
+                .bind(secs(&account.created_at))
+                .execute(&mut *tx),
+            )
+            .map_err(|e| format!("create_account: insert: {}", e))?;
+            block_on(tx.commit()).map_err(|e| format!("create_account: commit: {}", e))?;
+        }
+
         Ok(account)
     }
 
@@ -291,7 +513,7 @@ impl Store {
         }
 
         let now = now_iso();
-        let mut prev_hash = GENESIS_HASH.to_string();
+        let mut prev_hash = state.global_chain_head.clone();
         let mut entry_ids: Vec<String> = Vec::new();
         let mut created_entries: Vec<EntryRecord> = Vec::new();
 
@@ -340,6 +562,125 @@ impl Store {
             entries: created_entries.clone(),
             created_at: now.clone(),
         };
+
+        if let Some(pool) = &self.pool {
+            let mut tx = block_on(pool.begin())
+                .map_err(|e| PostError::Validation(format!("post: begin tx: {}", e)))?;
+            let inserted_posting = block_on(
+                sqlx::query(
+                    "INSERT INTO postings (posting_id, ref_tx_id, memo, status, hash_chain_head, created_at)
+                 VALUES ($1, $2, $3, 'posted', $4, to_timestamp($5))
+                 ON CONFLICT (posting_id) DO NOTHING",
+                )
+                .bind(&posting_record.posting_id)
+                .bind(posting_record.ref_tx_id.as_ref())
+                .bind(posting_record.memo.as_ref())
+                .bind(&posting_record.hash_head)
+                .bind(secs(&posting_record.created_at))
+                .execute(&mut *tx),
+            )
+            .map_err(|e| PostError::Validation(format!("post: insert posting: {}", e)))?;
+            if inserted_posting.rows_affected() == 0 {
+                drop(tx);
+                let existing = block_on(
+                    sqlx::query_as::<_, PostingRow>(
+                        "SELECT posting_id, ref_tx_id, memo, status, hash_chain_head, created_at
+                         FROM postings WHERE posting_id = $1",
+                    )
+                    .bind(&req.posting_id)
+                    .fetch_one(pool),
+                )
+                .map_err(|e| PostError::Validation(format!("post: fetch existing: {}", e)))?;
+                let entries: Vec<EntryRow> = block_on(
+                    sqlx::query_as::<_, EntryRow>(
+                        "SELECT entry_id, posting_id, account_id, direction, amount::text AS amount, asset, sequence_number, prev_hash, this_hash, created_at
+                         FROM entries WHERE posting_id = $1 ORDER BY sequence_number",
+                    )
+                    .bind(&req.posting_id)
+                    .fetch_all(pool),
+                )
+                .map_err(|e| PostError::Validation(format!("post: fetch existing entries: {}", e)))?;
+                let entry_ids: Vec<String> = entries.iter().map(|e| e.entry_id.clone()).collect();
+                let replay_resp = PostingResponse {
+                    posting_id: existing.posting_id,
+                    status: existing.status,
+                    entry_ids,
+                    hash_head: existing.hash_chain_head,
+                };
+                let mut st = self.inner.lock();
+                if !st.postings.contains_key(&replay_resp.posting_id) {
+                    st.postings
+                        .insert(replay_resp.posting_id.clone(), posting_record.clone());
+                    for e in entries {
+                        let amount: u64 = e.amount.parse().unwrap_or(0);
+                        st.entries.push(EntryRecord {
+                            entry_id: e.entry_id,
+                            posting_id: e.posting_id,
+                            account_id: e.account_id,
+                            direction: e.direction,
+                            amount,
+                            asset: e.asset,
+                            sequence_number: e.sequence_number as u64,
+                            prev_hash: e.prev_hash,
+                            this_hash: e.this_hash,
+                            created_at: e.created_at,
+                        });
+                    }
+                }
+                return Ok((replay_resp, true));
+            }
+
+            for e in &created_entries {
+                block_on(
+                    sqlx::query(
+                        "INSERT INTO entries (entry_id, posting_id, account_id, direction, amount, asset, sequence_number, prev_hash, this_hash, created_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, to_timestamp($10))",
+                    )
+                    .bind(&e.entry_id)
+                    .bind(&e.posting_id)
+                    .bind(&e.account_id)
+                    .bind(&e.direction)
+                    .bind(e.amount as i64)
+                    .bind(&e.asset)
+                    .bind(e.sequence_number as i64)
+                    .bind(&e.prev_hash)
+                    .bind(&e.this_hash)
+                    .bind(secs(&e.created_at))
+                    .execute(&mut *tx),
+                )
+                .map_err(|err| PostError::Validation(format!("post: insert entry: {}", err)))?;
+            }
+
+            block_on(
+                sqlx::query(
+                    "INSERT INTO hash_chain (posting_id, head_hash, global_sequence_head, created_at)
+                 VALUES ($1, $2, $3, to_timestamp($4))
+                 ON CONFLICT (posting_id) DO NOTHING",
+                )
+                .bind(&req.posting_id)
+                .bind(&hash_head)
+                .bind(&global_sequence_head)
+                .bind(secs(&now))
+                .execute(&mut *tx),
+            )
+            .map_err(|e| PostError::Validation(format!("post: insert anchor: {}", e)))?;
+
+            if let Err(e) = block_on(tx.commit()) {
+                let mut st = self.inner.lock();
+                let entry_ids_set: std::collections::HashSet<String> =
+                    entry_ids.iter().cloned().collect();
+                st.entries.retain(|e| !entry_ids_set.contains(&e.entry_id));
+                st.postings.remove(&req.posting_id);
+                st.hash_chain_anchors.remove(&req.posting_id);
+                st.global_chain_head = st
+                    .entries
+                    .last()
+                    .map(|e| e.this_hash.clone())
+                    .unwrap_or_else(|| GENESIS_HASH.to_string());
+                return Err(PostError::Validation(format!("post: commit: {}", e)));
+            }
+        }
+
         state
             .postings
             .insert(req.posting_id.clone(), posting_record);
@@ -427,6 +768,26 @@ impl Store {
         let mut state = self.inner.lock();
         let snaps = crate::snapshot::snapshot_all(&state);
         state.snapshots = snaps.clone();
+        drop(state);
+
+        if let Some(pool) = &self.pool {
+            for s in &snaps {
+                let _ = block_on(
+                    sqlx::query(
+                        "INSERT INTO balance_snapshots (account_id, asset, balance, as_of_ts, last_entry_id)
+                     VALUES ($1, $2, $3::numeric, to_timestamp($4), $5)
+                     ON CONFLICT (account_id, asset, as_of_ts) DO NOTHING",
+                    )
+                    .bind(&s.account_id)
+                    .bind(&s.asset)
+                    .bind(s.balance.to_string())
+                    .bind(secs(&s.as_of_ts))
+                    .bind(&s.last_entry_id)
+                    .execute(pool),
+                );
+            }
+        }
+
         snaps
     }
 
@@ -548,8 +909,77 @@ pub fn now_iso() -> String {
     format!("{}", secs)
 }
 
+fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(fut))
+}
+
+fn secs(s: &str) -> i64 {
+    s.parse::<i64>().unwrap_or(0)
+}
+
+fn is_already_applied(err: &sqlx::Error) -> bool {
+    if let Some(db) = err.as_database_error() {
+        if let Some(code) = db.code() {
+            return code == "42710" || code == "42P07";
+        }
+    }
+    false
+}
+
 impl Default for Store {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct AccountRow {
+    account_id: String,
+    type_field: String,
+    asset_class: String,
+    label: String,
+    parent_id: Option<String>,
+    status: String,
+    created_at: String,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct PostingRow {
+    posting_id: String,
+    ref_tx_id: Option<String>,
+    memo: Option<String>,
+    status: String,
+    hash_chain_head: String,
+    created_at: String,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct EntryRow {
+    entry_id: String,
+    posting_id: String,
+    account_id: String,
+    direction: String,
+    amount: String,
+    asset: String,
+    sequence_number: i64,
+    prev_hash: String,
+    this_hash: String,
+    created_at: String,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct AnchorRow {
+    posting_id: String,
+    head_hash: String,
+    global_sequence_head: String,
+    created_at: String,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct SnapshotRow {
+    account_id: String,
+    asset: String,
+    balance: String,
+    as_of_ts: String,
+    last_entry_id: String,
 }

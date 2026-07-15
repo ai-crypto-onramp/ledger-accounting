@@ -1,7 +1,8 @@
 use ledger_accounting::posting::PostingRequest;
 use ledger_accounting::store::Store;
 use serde_json::json;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
+use tokio::sync::Mutex;
 
 fn pg_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -45,7 +46,7 @@ async fn postgres_roundtrip_and_persistence() {
             return;
         }
     };
-    let _guard = pg_lock().lock().unwrap();
+    let _guard = pg_lock().lock().await;
 
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(4)
@@ -170,7 +171,7 @@ async fn postgres_unbalanced_rolls_back_and_idempotent_retry() {
         Some(u) => u,
         None => return,
     };
-    let _guard = pg_lock().lock().unwrap();
+    let _guard = pg_lock().lock().await;
 
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(4)

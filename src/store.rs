@@ -124,14 +124,6 @@ impl Store {
             Some(p) => p,
             None => return Ok(()),
         };
-        let mut state = self.inner.lock();
-        state.accounts.clear();
-        state.postings.clear();
-        state.entries.clear();
-        state.hash_chain_anchors.clear();
-        state.snapshots.clear();
-        state.sequence = 0;
-        state.global_chain_head = GENESIS_HASH.to_string();
 
         let accounts: Vec<AccountRow> = sqlx::query_as::<_, AccountRow>(
             "SELECT account_id, type_name AS type_field, asset_class, label, parent_id, status, floor(extract(epoch from created_at))::bigint::text AS created_at FROM accounts ORDER BY created_at",
@@ -139,8 +131,9 @@ impl Store {
         .fetch_all(pool)
         .await
         .map_err(|e| format!("hydrate accounts failed: {}", e))?;
+        let mut new_accounts: HashMap<String, Account> = HashMap::new();
         for a in accounts {
-            state.accounts.insert(
+            new_accounts.insert(
                 a.account_id.clone(),
                 Account {
                     account_id: a.account_id,
@@ -162,6 +155,8 @@ impl Store {
         .map_err(|e| format!("hydrate entries failed: {}", e))?;
         let mut by_posting: std::collections::HashMap<String, Vec<EntryRecord>> =
             std::collections::HashMap::new();
+        let mut new_entries: Vec<EntryRecord> = Vec::with_capacity(entries.len());
+        let mut new_sequence: u64 = 0;
         for e in entries {
             let amount: u64 = e
                 .amount
@@ -179,17 +174,16 @@ impl Store {
                 this_hash: e.this_hash,
                 created_at: e.created_at,
             };
-            if record.sequence_number > state.sequence {
-                state.sequence = record.sequence_number;
+            if record.sequence_number > new_sequence {
+                new_sequence = record.sequence_number;
             }
             by_posting
                 .entry(record.posting_id.clone())
                 .or_default()
                 .push(record.clone());
-            state.entries.push(record);
+            new_entries.push(record);
         }
-        state.global_chain_head = state
-            .entries
+        let new_global_chain_head = new_entries
             .last()
             .map(|e| e.this_hash.clone())
             .unwrap_or_else(|| GENESIS_HASH.to_string());
@@ -200,9 +194,10 @@ impl Store {
         .fetch_all(pool)
         .await
         .map_err(|e| format!("hydrate postings failed: {}", e))?;
+        let mut new_postings: HashMap<String, PostingRecord> = HashMap::new();
         for p in postings {
             let entries = by_posting.remove(&p.posting_id).unwrap_or_default();
-            state.postings.insert(
+            new_postings.insert(
                 p.posting_id.clone(),
                 PostingRecord {
                     posting_id: p.posting_id,
@@ -222,8 +217,9 @@ impl Store {
         .fetch_all(pool)
         .await
         .map_err(|e| format!("hydrate anchors failed: {}", e))?;
+        let mut new_anchors: HashMap<String, HashChainAnchor> = HashMap::new();
         for a in anchors {
-            state.hash_chain_anchors.insert(
+            new_anchors.insert(
                 a.posting_id.clone(),
                 HashChainAnchor {
                     posting_id: a.posting_id,
@@ -240,6 +236,7 @@ impl Store {
         .fetch_all(pool)
         .await
         .map_err(|e| format!("hydrate snapshots failed: {}", e))?;
+        let mut new_snapshots: Vec<BalanceSnapshot> = Vec::with_capacity(snapshots.len());
         for s in snapshots {
             let balance: i128 = s
                 .balance
@@ -259,7 +256,7 @@ impl Store {
                     .await
                     .map_err(|e| format!("hydrate snapshot last_seq lookup failed: {}", e))?
                     .unwrap_or((0,));
-            state.snapshots.push(BalanceSnapshot {
+            new_snapshots.push(BalanceSnapshot {
                 account_id: s.account_id,
                 asset: s.asset,
                 balance,
@@ -268,6 +265,15 @@ impl Store {
                 last_sequence: last_sequence.0 as u64,
             });
         }
+
+        let mut state = self.inner.lock();
+        state.accounts = new_accounts;
+        state.postings = new_postings;
+        state.entries = new_entries;
+        state.hash_chain_anchors = new_anchors;
+        state.snapshots = new_snapshots;
+        state.sequence = new_sequence;
+        state.global_chain_head = new_global_chain_head;
 
         Ok(())
     }

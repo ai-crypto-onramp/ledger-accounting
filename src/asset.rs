@@ -13,7 +13,7 @@ impl AssetSpec {
     pub const fn fiat(code: &'static str, scale: u32, max_amount: u64) -> Self {
         Self {
             code,
-            class: "fiat",
+            class: "FIAT",
             scale,
             max_amount,
         }
@@ -22,7 +22,7 @@ impl AssetSpec {
     pub const fn crypto(code: &'static str, scale: u32, max_amount: u64) -> Self {
         Self {
             code,
-            class: "crypto",
+            class: "CRYPTO",
             scale,
             max_amount,
         }

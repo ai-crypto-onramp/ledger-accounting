@@ -13,8 +13,8 @@ pub fn verify_chain(state: &LedgerState) -> Result<(), ChainBreak> {
     let mut prev_hash = GENESIS_HASH.to_string();
     for e in &state.entries {
         let dir = match e.direction.as_str() {
-            "debit" => Direction::Debit,
-            "credit" => Direction::Credit,
+            "DEBIT" => Direction::Debit,
+            "CREDIT" => Direction::Credit,
             other => {
                 return Err(ChainBreak {
                     entry_id: e.entry_id.clone(),

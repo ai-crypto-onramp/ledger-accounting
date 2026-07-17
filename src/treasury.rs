@@ -22,13 +22,13 @@ pub fn hedge_entry(
         entries: vec![
             crate::posting::EntryInput {
                 account_id: treasury_account.to_string(),
-                direction: "debit".to_string(),
+                direction: "DEBIT".to_string(),
                 amount,
                 asset: asset.to_string(),
             },
             crate::posting::EntryInput {
                 account_id: venue_account.to_string(),
-                direction: "credit".to_string(),
+                direction: "CREDIT".to_string(),
                 amount,
                 asset: asset.to_string(),
             },
@@ -52,13 +52,13 @@ pub fn rebalance(
         entries: vec![
             crate::posting::EntryInput {
                 account_id: to_account.to_string(),
-                direction: "debit".to_string(),
+                direction: "DEBIT".to_string(),
                 amount,
                 asset: asset.to_string(),
             },
             crate::posting::EntryInput {
                 account_id: from_account.to_string(),
-                direction: "credit".to_string(),
+                direction: "CREDIT".to_string(),
                 amount,
                 asset: asset.to_string(),
             },

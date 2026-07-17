@@ -17,8 +17,8 @@ fn balanced_posting(posting_id: &str) -> serde_json::Value {
         "memo": "test",
         "ref_tx_id": "tx1",
         "entries": [
-            { "account_id": "uc", "direction": "debit", "amount": 100, "asset": "USD" },
-            { "account_id": "op", "direction": "credit", "amount": 100, "asset": "USD" }
+            { "account_id": "uc", "direction": "DEBIT", "amount": 100, "asset": "USD" },
+            { "account_id": "op", "direction": "CREDIT", "amount": 100, "asset": "USD" }
         ]
     })
 }
@@ -26,12 +26,12 @@ fn balanced_posting(posting_id: &str) -> serde_json::Value {
 fn setup(store: &Store) {
     store
         .create_account(
-            serde_json::from_value(create_account_body("uc", "user_custodial", "both")).unwrap(),
+            serde_json::from_value(create_account_body("uc", "user_custodial", "BOTH")).unwrap(),
         )
         .unwrap();
     store
         .create_account(
-            serde_json::from_value(create_account_body("op", "operational_fiat", "fiat")).unwrap(),
+            serde_json::from_value(create_account_body("op", "operational_fiat", "FIAT")).unwrap(),
         )
         .unwrap();
 }
@@ -43,7 +43,7 @@ fn balanced_posting_commits() {
     let req: PostingRequest = serde_json::from_value(balanced_posting("bal1")).unwrap();
     let (resp, replay) = store.post(req).unwrap();
     assert!(!replay);
-    assert_eq!(resp.status, "posted");
+    assert_eq!(resp.status, "POSTED");
     assert_eq!(store.entry_count(), 2);
     let bal = store.balance("uc", "USD").unwrap();
     assert_eq!(bal, 100);
@@ -58,8 +58,8 @@ fn unbalanced_posting_rejected_atomically() {
     let req: PostingRequest = serde_json::from_value(json!({
         "posting_id": "unbal1",
         "entries": [
-            { "account_id": "uc", "direction": "debit", "amount": 100, "asset": "USD" },
-            { "account_id": "op", "direction": "credit", "amount": 50, "asset": "USD" }
+            { "account_id": "uc", "direction": "DEBIT", "amount": 100, "asset": "USD" },
+            { "account_id": "op", "direction": "CREDIT", "amount": 50, "asset": "USD" }
         ]
     }))
     .unwrap();
@@ -88,8 +88,8 @@ fn idempotency_replay_after_non_committing_failure() {
     let bad: PostingRequest = serde_json::from_value(json!({
         "posting_id": "retry1",
         "entries": [
-            { "account_id": "uc", "direction": "debit", "amount": 100, "asset": "USD" },
-            { "account_id": "op", "direction": "credit", "amount": 50, "asset": "USD" }
+            { "account_id": "uc", "direction": "DEBIT", "amount": 100, "asset": "USD" },
+            { "account_id": "op", "direction": "CREDIT", "amount": 50, "asset": "USD" }
         ]
     }))
     .unwrap();
@@ -98,7 +98,7 @@ fn idempotency_replay_after_non_committing_failure() {
     let good: PostingRequest = serde_json::from_value(balanced_posting("retry1")).unwrap();
     let (resp, replay) = store.post(good).unwrap();
     assert!(!replay);
-    assert_eq!(resp.status, "posted");
+    assert_eq!(resp.status, "POSTED");
     assert_eq!(store.entry_count(), 2);
 }
 
@@ -144,25 +144,25 @@ fn segregation_user_vs_operational_funds() {
     let store = Store::new();
     store
         .create_account(
-            serde_json::from_value(create_account_body("uc1", "user_custodial", "both")).unwrap(),
+            serde_json::from_value(create_account_body("uc1", "user_custodial", "BOTH")).unwrap(),
         )
         .unwrap();
     store
         .create_account(
-            serde_json::from_value(create_account_body("uc2", "user_custodial", "both")).unwrap(),
+            serde_json::from_value(create_account_body("uc2", "user_custodial", "BOTH")).unwrap(),
         )
         .unwrap();
     store
         .create_account(
-            serde_json::from_value(create_account_body("op", "operational_fiat", "fiat")).unwrap(),
+            serde_json::from_value(create_account_body("op", "operational_fiat", "FIAT")).unwrap(),
         )
         .unwrap();
     let _ = store.post(
         serde_json::from_value(json!({
             "posting_id": "seg1",
             "entries": [
-                { "account_id": "uc1", "direction": "debit", "amount": 70, "asset": "USD" },
-                { "account_id": "op", "direction": "credit", "amount": 70, "asset": "USD" }
+                { "account_id": "uc1", "direction": "DEBIT", "amount": 70, "asset": "USD" },
+                { "account_id": "op", "direction": "CREDIT", "amount": 70, "asset": "USD" }
             ]
         }))
         .unwrap(),
@@ -171,8 +171,8 @@ fn segregation_user_vs_operational_funds() {
         serde_json::from_value(json!({
             "posting_id": "seg2",
             "entries": [
-                { "account_id": "uc2", "direction": "debit", "amount": 30, "asset": "USD" },
-                { "account_id": "op", "direction": "credit", "amount": 30, "asset": "USD" }
+                { "account_id": "uc2", "direction": "DEBIT", "amount": 30, "asset": "USD" },
+                { "account_id": "op", "direction": "CREDIT", "amount": 30, "asset": "USD" }
             ]
         }))
         .unwrap(),
@@ -231,17 +231,17 @@ fn multi_asset_posting_balances_per_asset() {
     let store = Store::new();
     store
         .create_account(
-            serde_json::from_value(create_account_body("uc", "user_custodial", "both")).unwrap(),
+            serde_json::from_value(create_account_body("uc", "user_custodial", "BOTH")).unwrap(),
         )
         .unwrap();
     store
         .create_account(
-            serde_json::from_value(create_account_body("op", "operational_fiat", "fiat")).unwrap(),
+            serde_json::from_value(create_account_body("op", "operational_fiat", "FIAT")).unwrap(),
         )
         .unwrap();
     store
         .create_account(
-            serde_json::from_value(create_account_body("opc", "operational_crypto", "crypto"))
+            serde_json::from_value(create_account_body("opc", "operational_crypto", "CRYPTO"))
                 .unwrap(),
         )
         .unwrap();
@@ -249,10 +249,10 @@ fn multi_asset_posting_balances_per_asset() {
         serde_json::from_value(json!({
             "posting_id": "multi1",
             "entries": [
-                { "account_id": "uc", "direction": "debit", "amount": 100, "asset": "USD" },
-                { "account_id": "op", "direction": "credit", "amount": 100, "asset": "USD" },
-                { "account_id": "uc", "direction": "debit", "amount": 50, "asset": "BTC" },
-                { "account_id": "opc", "direction": "credit", "amount": 50, "asset": "BTC" }
+                { "account_id": "uc", "direction": "DEBIT", "amount": 100, "asset": "USD" },
+                { "account_id": "op", "direction": "CREDIT", "amount": 100, "asset": "USD" },
+                { "account_id": "uc", "direction": "DEBIT", "amount": 50, "asset": "BTC" },
+                { "account_id": "opc", "direction": "CREDIT", "amount": 50, "asset": "BTC" }
             ]
         }))
         .unwrap(),
@@ -269,10 +269,10 @@ fn unbalanced_per_asset_rejected() {
         serde_json::from_value(json!({
             "posting_id": "ubasset",
             "entries": [
-                { "account_id": "uc", "direction": "debit", "amount": 100, "asset": "USD" },
-                { "account_id": "op", "direction": "credit", "amount": 100, "asset": "USD" },
-                { "account_id": "uc", "direction": "debit", "amount": 50, "asset": "BTC" },
-                { "account_id": "op", "direction": "credit", "amount": 30, "asset": "BTC" }
+                { "account_id": "uc", "direction": "DEBIT", "amount": 100, "asset": "USD" },
+                { "account_id": "op", "direction": "CREDIT", "amount": 100, "asset": "USD" },
+                { "account_id": "uc", "direction": "DEBIT", "amount": 50, "asset": "BTC" },
+                { "account_id": "op", "direction": "CREDIT", "amount": 30, "asset": "BTC" }
             ]
         }))
         .unwrap(),
@@ -285,19 +285,19 @@ fn inactive_account_rejected() {
     let store = Store::new();
     store
         .create_account(
-            serde_json::from_value(create_account_body("uc", "user_custodial", "both")).unwrap(),
+            serde_json::from_value(create_account_body("uc", "user_custodial", "BOTH")).unwrap(),
         )
         .unwrap();
     {
         let mut state = store.inner.lock();
-        state.accounts.get_mut("uc").unwrap().status = "inactive".to_string();
+        state.accounts.get_mut("uc").unwrap().status = "INACTIVE".to_string();
     }
     let res = store.post(
         serde_json::from_value(json!({
             "posting_id": "inactive1",
             "entries": [
-                { "account_id": "uc", "direction": "debit", "amount": 10, "asset": "USD" },
-                { "account_id": "uc", "direction": "credit", "amount": 10, "asset": "USD" }
+                { "account_id": "uc", "direction": "DEBIT", "amount": 10, "asset": "USD" },
+                { "account_id": "uc", "direction": "CREDIT", "amount": 10, "asset": "USD" }
             ]
         }))
         .unwrap(),

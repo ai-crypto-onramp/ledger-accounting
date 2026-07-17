@@ -31,8 +31,8 @@ fn balanced_posting(posting_id: &str) -> serde_json::Value {
         "memo": "test",
         "ref_tx_id": "tx1",
         "entries": [
-            { "account_id": "uc", "direction": "debit", "amount": 100, "asset": "USD" },
-            { "account_id": "op", "direction": "credit", "amount": 100, "asset": "USD" }
+            { "account_id": "uc", "direction": "DEBIT", "amount": 100, "asset": "USD" },
+            { "account_id": "op", "direction": "CREDIT", "amount": 100, "asset": "USD" }
         ]
     })
 }
@@ -85,12 +85,12 @@ async fn postgres_roundtrip_and_persistence() {
 
     store
         .create_account(
-            serde_json::from_value(create_account_body("uc", "user_custodial", "both")).unwrap(),
+            serde_json::from_value(create_account_body("uc", "user_custodial", "BOTH")).unwrap(),
         )
         .unwrap();
     store
         .create_account(
-            serde_json::from_value(create_account_body("op", "operational_fiat", "fiat")).unwrap(),
+            serde_json::from_value(create_account_body("op", "operational_fiat", "FIAT")).unwrap(),
         )
         .unwrap();
 
@@ -125,15 +125,15 @@ async fn postgres_roundtrip_and_persistence() {
 
     store2
         .create_account(
-            serde_json::from_value(create_account_body("opc", "operational_crypto", "crypto"))
+            serde_json::from_value(create_account_body("opc", "operational_crypto", "CRYPTO"))
                 .unwrap(),
         )
         .unwrap();
     let multi: PostingRequest = serde_json::from_value(json!({
         "posting_id": "pg2",
         "entries": [
-            { "account_id": "uc", "direction": "debit", "amount": 50, "asset": "BTC" },
-            { "account_id": "opc", "direction": "credit", "amount": 50, "asset": "BTC" }
+            { "account_id": "uc", "direction": "DEBIT", "amount": 50, "asset": "BTC" },
+            { "account_id": "opc", "direction": "CREDIT", "amount": 50, "asset": "BTC" }
         ]
     }))
     .unwrap();
@@ -193,20 +193,20 @@ async fn postgres_unbalanced_rolls_back_and_idempotent_retry() {
     store.hydrate().await.unwrap();
     store
         .create_account(
-            serde_json::from_value(create_account_body("uc", "user_custodial", "both")).unwrap(),
+            serde_json::from_value(create_account_body("uc", "user_custodial", "BOTH")).unwrap(),
         )
         .unwrap();
     store
         .create_account(
-            serde_json::from_value(create_account_body("op", "operational_fiat", "fiat")).unwrap(),
+            serde_json::from_value(create_account_body("op", "operational_fiat", "FIAT")).unwrap(),
         )
         .unwrap();
 
     let bad: PostingRequest = serde_json::from_value(json!({
         "posting_id": "rb1",
         "entries": [
-            { "account_id": "uc", "direction": "debit", "amount": 100, "asset": "USD" },
-            { "account_id": "op", "direction": "credit", "amount": 50, "asset": "USD" }
+            { "account_id": "uc", "direction": "DEBIT", "amount": 100, "asset": "USD" },
+            { "account_id": "op", "direction": "CREDIT", "amount": 50, "asset": "USD" }
         ]
     }))
     .unwrap();

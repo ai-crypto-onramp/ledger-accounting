@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "UPPERCASE")]
 pub enum NormalBalance {
     Debit,
     Credit,
@@ -9,14 +9,14 @@ pub enum NormalBalance {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "UPPERCASE")]
 pub enum Direction {
     Debit,
     Credit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "UPPERCASE")]
 pub enum AssetClass {
     Fiat,
     Crypto,
@@ -38,67 +38,67 @@ pub const CHART: &[AccountType] = &[
     AccountType {
         type_name: "user_custodial",
         normal_balance: NormalBalance::Credit,
-        allowed_directions: &["debit", "credit"],
+        allowed_directions: &["DEBIT", "CREDIT"],
         asset_class: AssetClass::Both,
     },
     AccountType {
         type_name: "user_payable",
         normal_balance: NormalBalance::Credit,
-        allowed_directions: &["debit", "credit"],
+        allowed_directions: &["DEBIT", "CREDIT"],
         asset_class: AssetClass::Both,
     },
     AccountType {
         type_name: "operational_fiat",
         normal_balance: NormalBalance::Debit,
-        allowed_directions: &["debit", "credit"],
+        allowed_directions: &["DEBIT", "CREDIT"],
         asset_class: AssetClass::Fiat,
     },
     AccountType {
         type_name: "operational_crypto",
         normal_balance: NormalBalance::Debit,
-        allowed_directions: &["debit", "credit"],
+        allowed_directions: &["DEBIT", "CREDIT"],
         asset_class: AssetClass::Crypto,
     },
     AccountType {
         type_name: "treasury_fiat",
         normal_balance: NormalBalance::Debit,
-        allowed_directions: &["debit", "credit"],
+        allowed_directions: &["DEBIT", "CREDIT"],
         asset_class: AssetClass::Fiat,
     },
     AccountType {
         type_name: "treasury_crypto",
         normal_balance: NormalBalance::Debit,
-        allowed_directions: &["debit", "credit"],
+        allowed_directions: &["DEBIT", "CREDIT"],
         asset_class: AssetClass::Crypto,
     },
     AccountType {
         type_name: "fx_gain_loss",
         normal_balance: NormalBalance::Either,
-        allowed_directions: &["debit", "credit"],
+        allowed_directions: &["DEBIT", "CREDIT"],
         asset_class: AssetClass::Both,
     },
     AccountType {
         type_name: "fee_revenue",
         normal_balance: NormalBalance::Credit,
-        allowed_directions: &["debit", "credit"],
+        allowed_directions: &["DEBIT", "CREDIT"],
         asset_class: AssetClass::Both,
     },
     AccountType {
         type_name: "rail_settlement",
         normal_balance: NormalBalance::Debit,
-        allowed_directions: &["debit", "credit"],
+        allowed_directions: &["DEBIT", "CREDIT"],
         asset_class: AssetClass::Fiat,
     },
     AccountType {
         type_name: "venue_settlement",
         normal_balance: NormalBalance::Debit,
-        allowed_directions: &["debit", "credit"],
+        allowed_directions: &["DEBIT", "CREDIT"],
         asset_class: AssetClass::Both,
     },
     AccountType {
         type_name: "chargeback_reserve",
         normal_balance: NormalBalance::Credit,
-        allowed_directions: &["debit", "credit"],
+        allowed_directions: &["DEBIT", "CREDIT"],
         asset_class: AssetClass::Both,
     },
 ];
@@ -109,8 +109,8 @@ pub fn find_type(type_name: &str) -> Option<&'static AccountType> {
 
 pub fn direction_allowed(account_type: &AccountType, direction: Direction) -> bool {
     let dir_str = match direction {
-        Direction::Debit => "debit",
-        Direction::Credit => "credit",
+        Direction::Debit => "DEBIT",
+        Direction::Credit => "CREDIT",
     };
     account_type.allowed_directions.contains(&dir_str)
 }

@@ -21,8 +21,8 @@ pub fn build_snapshot(state: &LedgerState, account_id: &str, asset: &str) -> Bal
         .filter(|e| asset.is_empty() || e.asset == asset)
         .fold((0i128, String::new(), 0u64), |(bal, _last, _seq), e| {
             let delta = match e.direction.as_str() {
-                "debit" => e.amount as i128,
-                "credit" => -(e.amount as i128),
+                "DEBIT" => e.amount as i128,
+                "CREDIT" => -(e.amount as i128),
                 _ => 0,
             };
             (bal + delta, e.entry_id.clone(), e.sequence_number)

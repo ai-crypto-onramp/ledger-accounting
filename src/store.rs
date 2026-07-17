@@ -289,7 +289,7 @@ impl Store {
                 }
                 id
             }
-            None => uuid::Uuid::new_v4().to_string(),
+            None => uuid::Uuid::now_v7().to_string(),
         };
 
         let now = now_iso();
@@ -299,7 +299,7 @@ impl Store {
             asset_class: req.asset_class.clone(),
             label: req.label.clone(),
             parent_id: req.parent_id.clone(),
-            status: "active".to_string(),
+            status: "ACTIVE".to_string(),
             created_at: now,
         };
         state.accounts.insert(account_id, account.clone());
@@ -310,8 +310,8 @@ impl Store {
                 block_on(pool.begin()).map_err(|e| format!("create_account: begin tx: {}", e))?;
             block_on(
                 sqlx::query(
-                    "INSERT INTO accounts (account_id, type_name, asset_class, label, parent_id, status, created_at)
-                 VALUES ($1, $2, $3, $4, $5, 'active', to_timestamp($6))
+                    "INSERT INTO accounts (account_id, type_name, asset_class, label, parent_id, status, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, 'ACTIVE', to_timestamp($6), to_timestamp($6))
                  ON CONFLICT (account_id) DO NOTHING",
                 )
                 .bind(&account.account_id)
@@ -408,8 +408,8 @@ impl Store {
             .take(limit)
             .scan(0i128, |acc, e| {
                 match e.direction.as_str() {
-                    "debit" => *acc += e.amount as i128,
-                    "credit" => *acc -= e.amount as i128,
+                    "DEBIT" => *acc += e.amount as i128,
+                    "CREDIT" => *acc -= e.amount as i128,
                     _ => {}
                 }
                 Some((e, *acc))
@@ -503,7 +503,7 @@ impl Store {
         for (account_id, _dir, _amount, _asset) in &entries_parsed {
             match state.accounts.get(account_id) {
                 Some(acc) => {
-                    if acc.status != "active" {
+                    if acc.status != "ACTIVE" {
                         return Err(PostError::Validation(format!(
                             "account not active: {}",
                             account_id
@@ -553,7 +553,7 @@ impl Store {
         let mut created_entries: Vec<EntryRecord> = Vec::new();
 
         for (account_id, dir, amount, asset) in entries_parsed {
-            let entry_id = uuid::Uuid::new_v4().to_string();
+            let entry_id = uuid::Uuid::now_v7().to_string();
             state.sequence += 1;
             let seq = state.sequence;
             let canonical = posting::canonical_bytes(
@@ -571,8 +571,8 @@ impl Store {
                 posting_id: req.posting_id.clone(),
                 account_id,
                 direction: match dir {
-                    Direction::Debit => "debit".to_string(),
-                    Direction::Credit => "credit".to_string(),
+                    Direction::Debit => "DEBIT".to_string(),
+                    Direction::Credit => "CREDIT".to_string(),
                 },
                 amount,
                 asset,
@@ -592,7 +592,7 @@ impl Store {
             posting_id: req.posting_id.clone(),
             ref_tx_id: req.ref_tx_id.clone(),
             memo: req.memo.clone(),
-            status: "posted".to_string(),
+            status: "POSTED".to_string(),
             hash_head: hash_head.clone(),
             entries: created_entries.clone(),
             created_at: now.clone(),
@@ -603,8 +603,8 @@ impl Store {
                 .map_err(|e| PostError::Validation(format!("post: begin tx: {}", e)))?;
             let inserted_posting = block_on(
                 sqlx::query(
-                    "INSERT INTO postings (posting_id, ref_tx_id, memo, status, hash_chain_head, created_at)
-                 VALUES ($1, $2, $3, 'posted', $4, to_timestamp($5))
+                    "INSERT INTO postings (posting_id, ref_tx_id, memo, status, hash_chain_head, created_at, updated_at)
+                 VALUES ($1, $2, $3, 'POSTED', $4, to_timestamp($5), to_timestamp($5))
                  ON CONFLICT (posting_id) DO NOTHING",
                 )
                 .bind(&posting_record.posting_id)
@@ -668,8 +668,8 @@ impl Store {
             for e in &created_entries {
                 block_on(
                     sqlx::query(
-                        "INSERT INTO entries (entry_id, posting_id, account_id, direction, amount, asset, sequence_number, prev_hash, this_hash, created_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, to_timestamp($10))",
+                        "INSERT INTO entries (entry_id, posting_id, account_id, direction, amount, asset, sequence_number, prev_hash, this_hash, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, to_timestamp($10), to_timestamp($10))",
                     )
                     .bind(&e.entry_id)
                     .bind(&e.posting_id)
@@ -688,8 +688,8 @@ impl Store {
 
             block_on(
                 sqlx::query(
-                    "INSERT INTO hash_chain (posting_id, head_hash, global_sequence_head, created_at)
-                 VALUES ($1, $2, $3, to_timestamp($4))
+                    "INSERT INTO hash_chain (posting_id, head_hash, global_sequence_head, created_at, updated_at)
+                 VALUES ($1, $2, $3, to_timestamp($4), to_timestamp($4))
                  ON CONFLICT (posting_id) DO NOTHING",
                 )
                 .bind(&req.posting_id)
@@ -733,7 +733,7 @@ impl Store {
         state.global_chain_head = global_sequence_head.clone();
 
         let event = AuditEvent {
-            event_id: uuid::Uuid::new_v4().to_string(),
+            event_id: uuid::Uuid::now_v7().to_string(),
             posting_id: req.posting_id.clone(),
             entry_ids: entry_ids.clone(),
             hash_head: hash_head.clone(),
@@ -744,7 +744,7 @@ impl Store {
         Ok((
             PostingResponse {
                 posting_id: req.posting_id,
-                status: "posted".to_string(),
+                status: "POSTED".to_string(),
                 entry_ids,
                 hash_head,
             },
@@ -809,8 +809,8 @@ impl Store {
             for s in &snaps {
                 let _ = block_on(
                     sqlx::query(
-                        "INSERT INTO balance_snapshots (account_id, asset, balance, as_of_ts, last_entry_id)
-                     VALUES ($1, $2, $3::numeric, to_timestamp($4), $5)
+                        "INSERT INTO balance_snapshots (account_id, asset, balance, as_of_ts, last_entry_id, created_at, updated_at)
+                     VALUES ($1, $2, $3::numeric, to_timestamp($4), $5, to_timestamp($4), to_timestamp($4))
                      ON CONFLICT (account_id, asset, as_of_ts) DO NOTHING",
                     )
                     .bind(&s.account_id)
@@ -858,8 +858,8 @@ impl Store {
                     .filter(|e| e.sequence_number > last_seq)
                     .fold(0i128, |acc, e| {
                         let d = match e.direction.as_str() {
-                            "debit" => e.amount as i128,
-                            "credit" => -(e.amount as i128),
+                            "DEBIT" => e.amount as i128,
+                            "CREDIT" => -(e.amount as i128),
                             _ => 0,
                         };
                         acc + d
@@ -929,8 +929,8 @@ fn compute_balance(state: &LedgerState, account_id: &str, asset: &str) -> i128 {
         .filter(|e| e.account_id == account_id)
         .filter(|e| asset.is_empty() || e.asset == asset)
         .fold(0i128, |acc, e| match e.direction.as_str() {
-            "debit" => acc + e.amount as i128,
-            "credit" => acc - e.amount as i128,
+            "DEBIT" => acc + e.amount as i128,
+            "CREDIT" => acc - e.amount as i128,
             _ => acc,
         })
 }

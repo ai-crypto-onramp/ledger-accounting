@@ -32,9 +32,9 @@ pub struct AccountResponse {
 
 pub fn parse_asset_class(s: &str) -> Option<AssetClass> {
     match s {
-        "fiat" => Some(AssetClass::Fiat),
-        "crypto" => Some(AssetClass::Crypto),
-        "both" => Some(AssetClass::Both),
+        "FIAT" => Some(AssetClass::Fiat),
+        "CRYPTO" => Some(AssetClass::Crypto),
+        "BOTH" => Some(AssetClass::Both),
         _ => None,
     }
 }
@@ -62,8 +62,8 @@ pub fn validate(req: &CreateAccountRequest) -> Result<(String, AssetClass), Stri
 
 pub fn parse_direction(s: &str) -> Option<Direction> {
     match s {
-        "debit" => Some(Direction::Debit),
-        "credit" => Some(Direction::Credit),
+        "DEBIT" => Some(Direction::Debit),
+        "CREDIT" => Some(Direction::Credit),
         _ => None,
     }
 }

@@ -64,8 +64,8 @@ pub fn canonical_bytes(
     created_at: &str,
 ) -> Vec<u8> {
     let dir_str = match direction {
-        Direction::Debit => "debit",
-        Direction::Credit => "credit",
+        Direction::Debit => "DEBIT",
+        Direction::Credit => "CREDIT",
     };
     format!(
         "{}|{}|{}|{}|{}|{}|{}",

@@ -160,8 +160,8 @@ mod tests {
             "memo": "test",
             "ref_tx_id": "tx1",
             "entries": [
-                { "account_id": "uc", "direction": "debit", "amount": 100, "asset": "USD" },
-                { "account_id": "op", "direction": "credit", "amount": 100, "asset": "USD" }
+                { "account_id": "uc", "direction": "DEBIT", "amount": 100, "asset": "USD" },
+                { "account_id": "op", "direction": "CREDIT", "amount": 100, "asset": "USD" }
             ]
         })
     }
@@ -170,8 +170,8 @@ mod tests {
         json!({
             "posting_id": posting_id,
             "entries": [
-                { "account_id": "uc", "direction": "debit", "amount": 100, "asset": "USD" },
-                { "account_id": "op", "direction": "credit", "amount": 50, "asset": "USD" }
+                { "account_id": "uc", "direction": "DEBIT", "amount": 100, "asset": "USD" },
+                { "account_id": "op", "direction": "CREDIT", "amount": 50, "asset": "USD" }
             ]
         })
     }
@@ -180,13 +180,13 @@ mod tests {
         let _ = post_json(
             router,
             "/v1/accounts",
-            create_account_body("uc", "user_custodial", "both"),
+            create_account_body("uc", "user_custodial", "BOTH"),
         )
         .await;
         let _ = post_json(
             router,
             "/v1/accounts",
-            create_account_body("op", "operational_fiat", "fiat"),
+            create_account_body("op", "operational_fiat", "FIAT"),
         )
         .await;
     }
@@ -288,7 +288,7 @@ mod tests {
         let (status, val) = post_json(
             &router,
             "/v1/accounts",
-            create_account_body("a1", "bogus", "fiat"),
+            create_account_body("a1", "bogus", "FIAT"),
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -304,14 +304,14 @@ mod tests {
         let (status, val) = post_json(
             &router,
             "/v1/accounts",
-            create_account_body("a2", "operational_fiat", "crypto"),
+            create_account_body("a2", "operational_fiat", "CRYPTO"),
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(val["error"]
             .as_str()
             .unwrap()
-            .contains("asset_class crypto not allowed for type operational_fiat"));
+            .contains("asset_class CRYPTO not allowed for type operational_fiat"));
     }
 
     #[tokio::test]
@@ -320,7 +320,7 @@ mod tests {
         let (status, val) = post_json(
             &router,
             "/v1/accounts",
-            create_account_body("acct-uc", "user_custodial", "fiat"),
+            create_account_body("acct-uc", "user_custodial", "FIAT"),
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
@@ -340,7 +340,7 @@ mod tests {
         setup_two_accounts(&router).await;
         let (status, val) = post_json(&router, "/v1/postings", balanced_posting_body("p1")).await;
         assert_eq!(status, StatusCode::CREATED, "body: {:?}", val);
-        assert_eq!(val["status"], "posted");
+        assert_eq!(val["status"], "POSTED");
         let entry_ids = val["entry_ids"].as_array().unwrap();
         assert_eq!(entry_ids.len(), 2);
         let hash_head = val["hash_head"].as_str().unwrap();
@@ -362,7 +362,7 @@ mod tests {
         let _ = post_json(
             &router,
             "/v1/accounts",
-            create_account_body("uc", "user_custodial", "both"),
+            create_account_body("uc", "user_custodial", "BOTH"),
         )
         .await;
         let (status, val) = post_json(
@@ -371,8 +371,8 @@ mod tests {
             json!({
                 "posting_id": "p3",
                 "entries": [
-                    { "account_id": "nope", "direction": "debit", "amount": 10, "asset": "USD" },
-                    { "account_id": "uc", "direction": "credit", "amount": 10, "asset": "USD" }
+                    { "account_id": "nope", "direction": "DEBIT", "amount": 10, "asset": "USD" },
+                    { "account_id": "uc", "direction": "CREDIT", "amount": 10, "asset": "USD" }
                 ]
             }),
         )
@@ -387,7 +387,7 @@ mod tests {
         let _ = post_json(
             &router,
             "/v1/accounts",
-            create_account_body("uc", "user_custodial", "both"),
+            create_account_body("uc", "user_custodial", "BOTH"),
         )
         .await;
         let mut entries = Vec::new();
@@ -415,7 +415,7 @@ mod tests {
         let _ = post_json(
             &router,
             "/v1/accounts",
-            create_account_body("uc", "user_custodial", "both"),
+            create_account_body("uc", "user_custodial", "BOTH"),
         )
         .await;
         let (status, val) = post_json(
@@ -424,8 +424,8 @@ mod tests {
             json!({
                 "posting_id": "pz",
                 "entries": [
-                    { "account_id": "uc", "direction": "debit", "amount": 0, "asset": "USD" },
-                    { "account_id": "uc", "direction": "credit", "amount": 0, "asset": "USD" }
+                    { "account_id": "uc", "direction": "DEBIT", "amount": 0, "asset": "USD" },
+                    { "account_id": "uc", "direction": "CREDIT", "amount": 0, "asset": "USD" }
                 ]
             }),
         )
@@ -459,7 +459,7 @@ mod tests {
         let (status, val2) = get_json(&router, "/v1/postings/pget").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(val2["posting_id"], "pget");
-        assert_eq!(val2["status"], "posted");
+        assert_eq!(val2["status"], "POSTED");
         let entries = val2["entries"].as_array().unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0]["entry_id"], val1["entry_ids"][0]);
@@ -526,13 +526,13 @@ mod tests {
         let store = Store::new();
         let _ = store
             .create_account(
-                serde_json::from_value(create_account_body("uc", "user_custodial", "both"))
+                serde_json::from_value(create_account_body("uc", "user_custodial", "BOTH"))
                     .unwrap(),
             )
             .unwrap();
         let _ = store
             .create_account(
-                serde_json::from_value(create_account_body("op", "operational_fiat", "fiat"))
+                serde_json::from_value(create_account_body("op", "operational_fiat", "FIAT"))
                     .unwrap(),
             )
             .unwrap();
@@ -548,13 +548,13 @@ mod tests {
         let store = Store::new();
         let _ = store
             .create_account(
-                serde_json::from_value(create_account_body("uc", "user_custodial", "both"))
+                serde_json::from_value(create_account_body("uc", "user_custodial", "BOTH"))
                     .unwrap(),
             )
             .unwrap();
         let _ = store
             .create_account(
-                serde_json::from_value(create_account_body("op", "operational_fiat", "fiat"))
+                serde_json::from_value(create_account_body("op", "operational_fiat", "FIAT"))
                     .unwrap(),
             )
             .unwrap();
@@ -571,13 +571,13 @@ mod tests {
         let store = Store::new();
         let _ = store
             .create_account(
-                serde_json::from_value(create_account_body("uc", "user_custodial", "both"))
+                serde_json::from_value(create_account_body("uc", "user_custodial", "BOTH"))
                     .unwrap(),
             )
             .unwrap();
         let _ = store
             .create_account(
-                serde_json::from_value(create_account_body("op", "operational_fiat", "fiat"))
+                serde_json::from_value(create_account_body("op", "operational_fiat", "FIAT"))
                     .unwrap(),
             )
             .unwrap();
@@ -591,13 +591,13 @@ mod tests {
         let store = Store::new();
         let _ = store
             .create_account(
-                serde_json::from_value(create_account_body("uc", "user_custodial", "both"))
+                serde_json::from_value(create_account_body("uc", "user_custodial", "BOTH"))
                     .unwrap(),
             )
             .unwrap();
         let _ = store
             .create_account(
-                serde_json::from_value(create_account_body("op", "operational_fiat", "fiat"))
+                serde_json::from_value(create_account_body("op", "operational_fiat", "FIAT"))
                     .unwrap(),
             )
             .unwrap();
@@ -616,13 +616,13 @@ mod tests {
         let store = Store::new();
         let _ = store
             .create_account(
-                serde_json::from_value(create_account_body("uc", "user_custodial", "both"))
+                serde_json::from_value(create_account_body("uc", "user_custodial", "BOTH"))
                     .unwrap(),
             )
             .unwrap();
         let _ = store
             .create_account(
-                serde_json::from_value(create_account_body("op", "operational_fiat", "fiat"))
+                serde_json::from_value(create_account_body("op", "operational_fiat", "FIAT"))
                     .unwrap(),
             )
             .unwrap();
@@ -642,16 +642,16 @@ mod tests {
         let _ = post_json(
             &router,
             "/v1/accounts",
-            create_account_body("opc", "operational_crypto", "crypto"),
+            create_account_body("opc", "operational_crypto", "CRYPTO"),
         )
         .await;
         let body = json!({
             "posting_id": "multi1",
             "entries": [
-                { "account_id": "uc", "direction": "debit", "amount": 100, "asset": "USD" },
-                { "account_id": "op", "direction": "credit", "amount": 100, "asset": "USD" },
-                { "account_id": "uc", "direction": "debit", "amount": 50, "asset": "BTC" },
-                { "account_id": "opc", "direction": "credit", "amount": 50, "asset": "BTC" }
+                { "account_id": "uc", "direction": "DEBIT", "amount": 100, "asset": "USD" },
+                { "account_id": "op", "direction": "CREDIT", "amount": 100, "asset": "USD" },
+                { "account_id": "uc", "direction": "DEBIT", "amount": 50, "asset": "BTC" },
+                { "account_id": "opc", "direction": "CREDIT", "amount": 50, "asset": "BTC" }
             ]
         });
         let (status, val) = post_json(&router, "/v1/postings", body).await;
@@ -671,10 +671,10 @@ mod tests {
         let body = json!({
             "posting_id": "ub1",
             "entries": [
-                { "account_id": "uc", "direction": "debit", "amount": 100, "asset": "USD" },
-                { "account_id": "op", "direction": "credit", "amount": 100, "asset": "USD" },
-                { "account_id": "uc", "direction": "debit", "amount": 50, "asset": "BTC" },
-                { "account_id": "op", "direction": "credit", "amount": 30, "asset": "BTC" }
+                { "account_id": "uc", "direction": "DEBIT", "amount": 100, "asset": "USD" },
+                { "account_id": "op", "direction": "CREDIT", "amount": 100, "asset": "USD" },
+                { "account_id": "uc", "direction": "DEBIT", "amount": 50, "asset": "BTC" },
+                { "account_id": "op", "direction": "CREDIT", "amount": 30, "asset": "BTC" }
             ]
         });
         let (status, val) = post_json(&router, "/v1/postings", body).await;
@@ -688,19 +688,19 @@ mod tests {
         let _ = post_json(
             &router,
             "/v1/accounts",
-            create_account_body("fr", "fee_revenue", "fiat"),
+            create_account_body("fr", "fee_revenue", "FIAT"),
         )
         .await;
         let _ = post_json(
             &router,
             "/v1/accounts",
-            create_account_body("op", "operational_fiat", "fiat"),
+            create_account_body("op", "operational_fiat", "FIAT"),
         )
         .await;
         let body = json!({
             "posting_id": "dirbad",
             "entries": [
-                { "account_id": "op", "direction": "credit", "amount": 10, "asset": "USD" },
+                { "account_id": "op", "direction": "CREDIT", "amount": 10, "asset": "USD" },
                 { "account_id": "fr", "direction": "sideways", "amount": 10, "asset": "USD" }
             ]
         });
@@ -715,13 +715,13 @@ mod tests {
         let _ = post_json(
             &router,
             "/v1/accounts",
-            create_account_body("dup", "user_custodial", "fiat"),
+            create_account_body("dup", "user_custodial", "FIAT"),
         )
         .await;
         let (status, _) = post_json(
             &router,
             "/v1/accounts",
-            create_account_body("dup", "user_custodial", "fiat"),
+            create_account_body("dup", "user_custodial", "FIAT"),
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -750,8 +750,8 @@ mod tests {
                 json!({
                     "posting_id": format!("page{}", i),
                     "entries": [
-                        { "account_id": "uc", "direction": "debit", "amount": 1, "asset": "USD" },
-                        { "account_id": "op", "direction": "credit", "amount": 1, "asset": "USD" }
+                        { "account_id": "uc", "direction": "DEBIT", "amount": 1, "asset": "USD" },
+                        { "account_id": "op", "direction": "CREDIT", "amount": 1, "asset": "USD" }
                     ]
                 }),
             )
@@ -782,8 +782,8 @@ mod tests {
             json!({
                 "posting_id": "unkasset",
                 "entries": [
-                    { "account_id": "uc", "direction": "debit", "amount": 10, "asset": "WOBBLE" },
-                    { "account_id": "op", "direction": "credit", "amount": 10, "asset": "WOBBLE" }
+                    { "account_id": "uc", "direction": "DEBIT", "amount": 10, "asset": "WOBBLE" },
+                    { "account_id": "op", "direction": "CREDIT", "amount": 10, "asset": "WOBBLE" }
                 ]
             }),
         )
@@ -797,13 +797,13 @@ mod tests {
         let store = Store::new();
         let _ = store
             .create_account(
-                serde_json::from_value(create_account_body("uc", "user_custodial", "both"))
+                serde_json::from_value(create_account_body("uc", "user_custodial", "BOTH"))
                     .unwrap(),
             )
             .unwrap();
         let _ = store
             .create_account(
-                serde_json::from_value(create_account_body("op", "operational_fiat", "fiat"))
+                serde_json::from_value(create_account_body("op", "operational_fiat", "FIAT"))
                     .unwrap(),
             )
             .unwrap();
@@ -825,13 +825,13 @@ mod tests {
         let store = Store::new();
         let _ = store
             .create_account(
-                serde_json::from_value(create_account_body("uc", "user_custodial", "both"))
+                serde_json::from_value(create_account_body("uc", "user_custodial", "BOTH"))
                     .unwrap(),
             )
             .unwrap();
         let _ = store
             .create_account(
-                serde_json::from_value(create_account_body("op", "operational_fiat", "fiat"))
+                serde_json::from_value(create_account_body("op", "operational_fiat", "FIAT"))
                     .unwrap(),
             )
             .unwrap();
@@ -849,19 +849,19 @@ mod tests {
         let store = Store::new();
         let _ = store
             .create_account(
-                serde_json::from_value(create_account_body("uc1", "user_custodial", "both"))
+                serde_json::from_value(create_account_body("uc1", "user_custodial", "BOTH"))
                     .unwrap(),
             )
             .unwrap();
         let _ = store
             .create_account(
-                serde_json::from_value(create_account_body("uc2", "user_custodial", "both"))
+                serde_json::from_value(create_account_body("uc2", "user_custodial", "BOTH"))
                     .unwrap(),
             )
             .unwrap();
         let _ = store
             .create_account(
-                serde_json::from_value(create_account_body("op", "operational_fiat", "fiat"))
+                serde_json::from_value(create_account_body("op", "operational_fiat", "FIAT"))
                     .unwrap(),
             )
             .unwrap();
@@ -869,8 +869,8 @@ mod tests {
             serde_json::from_value(json!({
                 "posting_id": "ucs1",
                 "entries": [
-                    { "account_id": "uc1", "direction": "debit", "amount": 70, "asset": "USD" },
-                    { "account_id": "op", "direction": "credit", "amount": 70, "asset": "USD" }
+                    { "account_id": "uc1", "direction": "DEBIT", "amount": 70, "asset": "USD" },
+                    { "account_id": "op", "direction": "CREDIT", "amount": 70, "asset": "USD" }
                 ]
             }))
             .unwrap(),
@@ -879,8 +879,8 @@ mod tests {
             serde_json::from_value(json!({
                 "posting_id": "ucs2",
                 "entries": [
-                    { "account_id": "uc2", "direction": "debit", "amount": 30, "asset": "USD" },
-                    { "account_id": "op", "direction": "credit", "amount": 30, "asset": "USD" }
+                    { "account_id": "uc2", "direction": "DEBIT", "amount": 30, "asset": "USD" },
+                    { "account_id": "op", "direction": "CREDIT", "amount": 30, "asset": "USD" }
                 ]
             }))
             .unwrap(),
@@ -894,13 +894,13 @@ mod tests {
         let store = Store::new();
         let _ = store
             .create_account(
-                serde_json::from_value(create_account_body("uc", "user_custodial", "both"))
+                serde_json::from_value(create_account_body("uc", "user_custodial", "BOTH"))
                     .unwrap(),
             )
             .unwrap();
         let _ = store
             .create_account(
-                serde_json::from_value(create_account_body("op", "operational_fiat", "fiat"))
+                serde_json::from_value(create_account_body("op", "operational_fiat", "FIAT"))
                     .unwrap(),
             )
             .unwrap();
@@ -919,13 +919,13 @@ mod tests {
         let store = Store::new();
         let _ = store
             .create_account(
-                serde_json::from_value(create_account_body("uc", "user_custodial", "both"))
+                serde_json::from_value(create_account_body("uc", "user_custodial", "BOTH"))
                     .unwrap(),
             )
             .unwrap();
         let _ = store
             .create_account(
-                serde_json::from_value(create_account_body("op", "operational_fiat", "fiat"))
+                serde_json::from_value(create_account_body("op", "operational_fiat", "FIAT"))
                     .unwrap(),
             )
             .unwrap();
@@ -946,30 +946,30 @@ mod tests {
         let store = Store::new();
         let _ = store
             .create_account(
-                serde_json::from_value(create_account_body("opf", "operational_fiat", "fiat"))
+                serde_json::from_value(create_account_body("opf", "operational_fiat", "FIAT"))
                     .unwrap(),
             )
             .unwrap();
         let _ = store
             .create_account(
-                serde_json::from_value(create_account_body("vs", "venue_settlement", "both"))
+                serde_json::from_value(create_account_body("vs", "venue_settlement", "BOTH"))
                     .unwrap(),
             )
             .unwrap();
         let _ = store
             .create_account(
-                serde_json::from_value(create_account_body("fx", "fx_gain_loss", "both")).unwrap(),
+                serde_json::from_value(create_account_body("fx", "fx_gain_loss", "BOTH")).unwrap(),
             )
             .unwrap();
         let _ = store.post(
             serde_json::from_value(json!({
                 "posting_id": "fx1",
                 "entries": [
-                    { "account_id": "vs", "direction": "debit", "amount": 50, "asset": "BTC" },
-                    { "account_id": "opf", "direction": "credit", "amount": 50, "asset": "BTC" },
-                    { "account_id": "opf", "direction": "debit", "amount": 105, "asset": "USD" },
-                    { "account_id": "vs", "direction": "credit", "amount": 100, "asset": "USD" },
-                    { "account_id": "fx", "direction": "credit", "amount": 5, "asset": "USD" }
+                    { "account_id": "vs", "direction": "DEBIT", "amount": 50, "asset": "BTC" },
+                    { "account_id": "opf", "direction": "CREDIT", "amount": 50, "asset": "BTC" },
+                    { "account_id": "opf", "direction": "DEBIT", "amount": 105, "asset": "USD" },
+                    { "account_id": "vs", "direction": "CREDIT", "amount": 100, "asset": "USD" },
+                    { "account_id": "fx", "direction": "CREDIT", "amount": 5, "asset": "USD" }
                 ]
             }))
             .unwrap(),

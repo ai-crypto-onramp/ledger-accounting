@@ -6,7 +6,7 @@ pub fn emit_audit_event(store: &Store, event: &AuditEvent) {
 
 pub fn build_event(posting_id: &str, entry_ids: &[String], hash_head: &str) -> AuditEvent {
     AuditEvent {
-        event_id: uuid::Uuid::new_v4().to_string(),
+        event_id: uuid::Uuid::now_v7().to_string(),
         posting_id: posting_id.to_string(),
         entry_ids: entry_ids.to_vec(),
         hash_head: hash_head.to_string(),

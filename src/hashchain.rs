@@ -74,7 +74,14 @@ mod tests {
     use crate::posting::EntryRecord;
     use crate::store::LedgerState;
 
-    fn entry(id: &str, seq: u64, prev_hash: &str, this_hash: &str, dir: &str, amount: u64) -> EntryRecord {
+    fn entry(
+        id: &str,
+        seq: u64,
+        prev_hash: &str,
+        this_hash: &str,
+        dir: &str,
+        amount: u64,
+    ) -> EntryRecord {
         EntryRecord {
             entry_id: id.to_string(),
             posting_id: "p".to_string(),
@@ -110,15 +117,7 @@ mod tests {
         let h1 = posting::compute_hash(GENESIS_HASH, &c1);
         let e1 = entry("e1", 1, GENESIS_HASH, &h1, "DEBIT", 10);
         // Compute proper hash for e2 to follow e1.
-        let c2 = posting::canonical_bytes(
-            &h1,
-            "e2",
-            "acct",
-            Direction::Credit,
-            10,
-            "USD",
-            "1000",
-        );
+        let c2 = posting::canonical_bytes(&h1, "e2", "acct", Direction::Credit, 10, "USD", "1000");
         let h2 = posting::compute_hash(&h1, &c2);
         let e2 = entry("e2", 2, &h1, &h2, "CREDIT", 10);
         let mut state = LedgerState::new();

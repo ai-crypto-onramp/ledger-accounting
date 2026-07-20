@@ -1046,8 +1046,12 @@ mod tests {
     }
 
     fn setup(store: &Store) {
-        store.create_account(acct_req("uc", "user_custodial", "BOTH")).unwrap();
-        store.create_account(acct_req("op", "operational_fiat", "FIAT")).unwrap();
+        store
+            .create_account(acct_req("uc", "user_custodial", "BOTH"))
+            .unwrap();
+        store
+            .create_account(acct_req("op", "operational_fiat", "FIAT"))
+            .unwrap();
     }
 
     #[test]
@@ -1115,8 +1119,12 @@ mod tests {
     fn list_accounts_sorts_by_created_at_then_id() {
         let store = Store::new();
         // Insert accounts; created_at is "now" so order should fall back to id.
-        store.create_account(acct_req("b", "user_custodial", "BOTH")).unwrap();
-        store.create_account(acct_req("a", "user_custodial", "BOTH")).unwrap();
+        store
+            .create_account(acct_req("b", "user_custodial", "BOTH"))
+            .unwrap();
+        store
+            .create_account(acct_req("a", "user_custodial", "BOTH"))
+            .unwrap();
         let all = store.list_accounts(None);
         assert_eq!(all.len(), 2);
         // Both created at the same second; sort by id ascending.
@@ -1129,7 +1137,9 @@ mod tests {
         let store = Store::new();
         setup(&store);
         for i in 0..3 {
-            store.post(balanced_posting(&format!("p{}", i), 1, "USD")).unwrap();
+            store
+                .post(balanced_posting(&format!("p{}", i), 1, "USD"))
+                .unwrap();
         }
         // limit 0 -> clamped to 1
         assert_eq!(store.list_postings(0).len(), 1);
@@ -1155,7 +1165,9 @@ mod tests {
         setup(&store);
         // 5 postings, all at same second.
         for i in 0..5 {
-            store.post(balanced_posting(&format!("l{}", i), 1, "USD")).unwrap();
+            store
+                .post(balanced_posting(&format!("l{}", i), 1, "USD"))
+                .unwrap();
         }
         // from="" matches all (>= "" is always true), to unset.
         let page = store.ledger("uc", Some(""), None, 10, None).unwrap();
@@ -1172,13 +1184,18 @@ mod tests {
         setup(&store);
         // Post a credit-first balanced posting to uc/op. To get a CREDIT on uc,
         // use a reversed balanced posting.
-        store.post(serde_json::from_value(serde_json::json!({
-            "posting_id": "cr1",
-            "entries": [
-                { "account_id": "op", "direction": "DEBIT", "amount": 30, "asset": "USD" },
-                { "account_id": "uc", "direction": "CREDIT", "amount": 30, "asset": "USD" }
-            ]
-        })).unwrap()).unwrap();
+        store
+            .post(
+                serde_json::from_value(serde_json::json!({
+                    "posting_id": "cr1",
+                    "entries": [
+                        { "account_id": "op", "direction": "DEBIT", "amount": 30, "asset": "USD" },
+                        { "account_id": "uc", "direction": "CREDIT", "amount": 30, "asset": "USD" }
+                    ]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
         let page = store.ledger("uc", None, None, 10, None).unwrap();
         assert_eq!(page.entries.len(), 1);
         assert_eq!(page.entries[0].running_balance, -30);
@@ -1334,22 +1351,32 @@ mod tests {
     fn balance_via_snapshot_credit_delta() {
         let store = Store::new();
         setup(&store);
-        store.post(serde_json::from_value(serde_json::json!({
-            "posting_id": "cvs1",
-            "entries": [
-                { "account_id": "op", "direction": "DEBIT", "amount": 50, "asset": "USD" },
-                { "account_id": "uc", "direction": "CREDIT", "amount": 50, "asset": "USD" }
-            ]
-        })).unwrap()).unwrap();
+        store
+            .post(
+                serde_json::from_value(serde_json::json!({
+                    "posting_id": "cvs1",
+                    "entries": [
+                        { "account_id": "op", "direction": "DEBIT", "amount": 50, "asset": "USD" },
+                        { "account_id": "uc", "direction": "CREDIT", "amount": 50, "asset": "USD" }
+                    ]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
         store.write_snapshots();
         // Additional posting with credit to uc -> negative delta.
-        store.post(serde_json::from_value(serde_json::json!({
-            "posting_id": "cvs2",
-            "entries": [
-                { "account_id": "op", "direction": "DEBIT", "amount": 20, "asset": "USD" },
-                { "account_id": "uc", "direction": "CREDIT", "amount": 20, "asset": "USD" }
-            ]
-        })).unwrap()).unwrap();
+        store
+            .post(
+                serde_json::from_value(serde_json::json!({
+                    "posting_id": "cvs2",
+                    "entries": [
+                        { "account_id": "op", "direction": "DEBIT", "amount": 20, "asset": "USD" },
+                        { "account_id": "uc", "direction": "CREDIT", "amount": 20, "asset": "USD" }
+                    ]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
         let direct = store.balance("uc", "USD").unwrap();
         let via = store.balance_via_snapshot("uc", "USD").unwrap();
         assert_eq!(direct, via);
@@ -1402,22 +1429,32 @@ mod tests {
         let store = Store::new();
         setup(&store);
         // Post a credit to uc.
-        store.post(serde_json::from_value(serde_json::json!({
-            "posting_id": "cb1",
-            "entries": [
-                { "account_id": "op", "direction": "DEBIT", "amount": 40, "asset": "USD" },
-                { "account_id": "uc", "direction": "CREDIT", "amount": 40, "asset": "USD" }
-            ]
-        })).unwrap()).unwrap();
+        store
+            .post(
+                serde_json::from_value(serde_json::json!({
+                    "posting_id": "cb1",
+                    "entries": [
+                        { "account_id": "op", "direction": "DEBIT", "amount": 40, "asset": "USD" },
+                        { "account_id": "uc", "direction": "CREDIT", "amount": 40, "asset": "USD" }
+                    ]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
         assert_eq!(store.balance("uc", "USD"), Some(-40));
         // asset filter excludes
-        store.post(serde_json::from_value(serde_json::json!({
-            "posting_id": "cb2",
-            "entries": [
-                { "account_id": "uc", "direction": "DEBIT", "amount": 5, "asset": "BTC" },
-                { "account_id": "op", "direction": "CREDIT", "amount": 5, "asset": "BTC" }
-            ]
-        })).unwrap()).unwrap();
+        store
+            .post(
+                serde_json::from_value(serde_json::json!({
+                    "posting_id": "cb2",
+                    "entries": [
+                        { "account_id": "uc", "direction": "DEBIT", "amount": 5, "asset": "BTC" },
+                        { "account_id": "op", "direction": "CREDIT", "amount": 5, "asset": "BTC" }
+                    ]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
         // USD balance unchanged by BTC posting.
         assert_eq!(store.balance("uc", "USD"), Some(-40));
         assert_eq!(store.balance("uc", "BTC"), Some(5));

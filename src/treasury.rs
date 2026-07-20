@@ -101,7 +101,12 @@ mod tests {
             .unwrap();
     }
 
-    fn balanced_two(account_id: &str, posting_id: &str, asset: &str, amount: u64) -> crate::posting::PostingRequest {
+    fn balanced_two(
+        account_id: &str,
+        posting_id: &str,
+        asset: &str,
+        amount: u64,
+    ) -> crate::posting::PostingRequest {
         serde_json::from_value(serde_json::json!({
             "posting_id": posting_id,
             "entries": [
@@ -146,7 +151,9 @@ mod tests {
         let store = Store::new();
         setup(&store);
         // Seed venue with BTC via a balanced posting against op.
-        store.post(balanced_two("venue", "seed1", "BTC", 500)).unwrap();
+        store
+            .post(balanced_two("venue", "seed1", "BTC", 500))
+            .unwrap();
         // Now rebalance 200 from venue -> treasury.
         rebalance(&store, "reb1", "venue", "treasury", "BTC", 200).unwrap();
         assert_eq!(store.balance("treasury", "BTC").unwrap(), 200);

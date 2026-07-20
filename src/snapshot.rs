@@ -126,11 +126,7 @@ mod tests {
 
     #[test]
     fn build_snapshot_sums_and_records_last() {
-        let state = state_with(vec![
-            entry("e1", 1),
-            entry("e2", 2),
-            entry("e3", 3),
-        ]);
+        let state = state_with(vec![entry("e1", 1), entry("e2", 2), entry("e3", 3)]);
         let snap = build_snapshot(&state, "acct", "USD");
         assert_eq!(snap.balance, 3);
         assert_eq!(snap.last_entry_id, "e3");
@@ -238,10 +234,7 @@ mod tests {
         assert_eq!(last_entry_id_before(&state, "acct", "USD", "150"), "e1");
         assert_eq!(last_entry_id_before(&state, "acct", "USD", "250"), "e2");
         assert_eq!(last_entry_id_before(&state, "acct", "USD", "0"), "");
-        assert_eq!(
-            last_entry_id_before(&state, "acct", "", "350"),
-            "e3"
-        );
+        assert_eq!(last_entry_id_before(&state, "acct", "", "350"), "e3");
     }
 
     #[test]

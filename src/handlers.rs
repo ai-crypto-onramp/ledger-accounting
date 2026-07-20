@@ -311,7 +311,8 @@ mod tests {
         let router = router(Store::new());
         setup_two_accounts(&router).await;
         let _ = post_json(&router, "/v1/postings", balanced_posting_body("ucs1")).await;
-        let (status, val) = get_json(&router, "/v1/reconciliation/user-custodial-sum?asset=USD").await;
+        let (status, val) =
+            get_json(&router, "/v1/reconciliation/user-custodial-sum?asset=USD").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(val["asset"], "USD");
         assert_eq!(val["user_custodial_sum"], "100");
@@ -341,8 +342,12 @@ mod tests {
     #[tokio::test]
     async fn verify_chain_route_reports_break() {
         let store = Store::new();
-        let _ = store.create_account(serde_json::from_value(create_account_body("uc", "user_custodial", "BOTH")).unwrap());
-        let _ = store.create_account(serde_json::from_value(create_account_body("op", "operational_fiat", "FIAT")).unwrap());
+        let _ = store.create_account(
+            serde_json::from_value(create_account_body("uc", "user_custodial", "BOTH")).unwrap(),
+        );
+        let _ = store.create_account(
+            serde_json::from_value(create_account_body("op", "operational_fiat", "FIAT")).unwrap(),
+        );
         let _ = store.post(serde_json::from_value(balanced_posting_body("vc2")).unwrap());
         {
             let mut state = store.inner.lock();
@@ -376,7 +381,12 @@ mod tests {
         let w = write_router(store);
         // Smoke test: hit healthz on read_router.
         let res = r
-            .oneshot(Request::builder().uri("/healthz").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -388,7 +398,10 @@ mod tests {
                     .method("POST")
                     .uri("/v1/accounts")
                     .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&create_account_body("x", "user_custodial", "FIAT")).unwrap()))
+                    .body(Body::from(
+                        serde_json::to_vec(&create_account_body("x", "user_custodial", "FIAT"))
+                            .unwrap(),
+                    ))
                     .unwrap(),
             )
             .await

@@ -1,3 +1,4 @@
+use ledger_accounting::audit;
 use ledger_accounting::config;
 use ledger_accounting::grpc;
 use ledger_accounting::handlers;
@@ -77,6 +78,13 @@ async fn main() {
                 eprintln!("[boot] failed to connect to postgres: {}", e);
                 std::process::exit(1);
             }
+        }
+    };
+    let store = match audit::AuditSink::from_env() {
+        Ok(sink) => store.with_audit_sink(sink),
+        Err(e) => {
+            eprintln!("[boot] audit sink init: {}", e);
+            std::process::exit(1);
         }
     };
     verify_chain_at_startup(&store);

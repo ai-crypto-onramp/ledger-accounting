@@ -24,6 +24,9 @@ sqlx = { version = "0.9", default-features = false, features = ["postgres", "run
 tonic = "0.12"
 prost = "0.13"
 tonic-reflection = "0.12"
+rdkafka = { version = "0.36", features = ["tokio"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+anyhow = "1"
 
 [dev-dependencies]
 tower = { version = "0.4", features = ["util"] }

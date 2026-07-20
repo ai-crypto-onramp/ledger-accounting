@@ -71,6 +71,7 @@ impl LedgerState {
 pub struct Store {
     pub inner: Arc<Mutex<LedgerState>>,
     pub pool: Option<sqlx::PgPool>,
+    pub audit_sink: Option<std::sync::Arc<crate::audit::AuditSink>>,
 }
 
 impl Store {
@@ -78,6 +79,7 @@ impl Store {
         Self {
             inner: Arc::new(Mutex::new(LedgerState::new())),
             pool: None,
+            audit_sink: None,
         }
     }
 
@@ -85,7 +87,13 @@ impl Store {
         Self {
             inner: Arc::new(Mutex::new(LedgerState::new())),
             pool: Some(pool),
+            audit_sink: None,
         }
+    }
+
+    pub fn with_audit_sink(mut self, sink: crate::audit::AuditSink) -> Self {
+        self.audit_sink = Some(std::sync::Arc::new(sink));
+        self
     }
 
     pub async fn connect(db_url: &str) -> Result<Self, sqlx::Error> {
@@ -739,7 +747,10 @@ impl Store {
             hash_head: hash_head.clone(),
             created_at: now,
         };
-        state.audit_events.push(event);
+        state.audit_events.push(event.clone());
+        if let Some(sink) = &self.audit_sink {
+            sink.emit(self, &event);
+        }
 
         Ok((
             PostingResponse {

@@ -11,6 +11,8 @@ pub struct Config {
     pub hash_chain_alg: String,
     pub hash_chain_salt: Option<String>,
     pub audit_event_log_url: Option<String>,
+    pub kafka_brokers: Option<String>,
+    pub dev_mode: bool,
     pub max_entries_per_posting: usize,
     pub max_amount: u64,
     pub log_level: String,
@@ -27,6 +29,8 @@ impl Default for Config {
             hash_chain_alg: "sha256".to_string(),
             hash_chain_salt: None,
             audit_event_log_url: None,
+            kafka_brokers: None,
+            dev_mode: false,
             max_entries_per_posting: 64,
             max_amount: 1_000_000_000_000,
             log_level: "info".to_string(),
@@ -66,6 +70,12 @@ impl Config {
         }
         if let Ok(v) = env::var("AUDIT_EVENT_LOG_URL") {
             c.audit_event_log_url = Some(v);
+        }
+        if let Ok(v) = env::var("KAFKA_BROKERS") {
+            c.kafka_brokers = Some(v);
+        }
+        if let Ok(v) = env::var("DEV_MODE") {
+            c.dev_mode = matches!(v.as_str(), "1" | "true" | "yes" | "on");
         }
         if let Ok(v) = env::var("MAX_ENTRIES_PER_POSTING") {
             if let Ok(p) = v.parse() {

@@ -121,7 +121,10 @@ mod tests {
 
     #[test]
     fn snapshot_interval_is_minutes_to_seconds() {
-        let c = Config { snapshot_interval_minutes: 2, ..Default::default() };
+        let c = Config {
+            snapshot_interval_minutes: 2,
+            ..Default::default()
+        };
         assert_eq!(c.snapshot_interval(), Duration::from_secs(120));
     }
 
@@ -137,7 +140,10 @@ mod tests {
 
     #[test]
     fn assert_isolation_rejects_other() {
-        let c = Config { db_isolation: "read_committed".to_string(), ..Default::default() };
+        let c = Config {
+            db_isolation: "read_committed".to_string(),
+            ..Default::default()
+        };
         let err = c.assert_isolation().unwrap_err();
         assert!(err.contains("read_committed"));
         assert!(err.contains("serializable"));

@@ -50,7 +50,7 @@ impl AuditSink {
             .filter(|v| !v.is_empty());
         let dev_mode = std::env::var("DEV_MODE")
             .ok()
-            .map_or(false, |v| matches!(v.as_str(), "1" | "true" | "yes" | "on"));
+            .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"));
         match brokers {
             Some(b) => {
                 let producer: rdkafka::producer::FutureProducer = rdkafka::ClientConfig::new()
@@ -111,7 +111,7 @@ impl AuditSink {
             });
         } else if std::env::var("DEV_MODE")
             .ok()
-            .map_or(false, |v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+            .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
         {
             eprintln!(
                 "[audit] would post event {} for posting {} to audit.v1",

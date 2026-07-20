@@ -98,3 +98,126 @@ impl Config {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_has_expected_values() {
+        let c = Config::default();
+        assert_eq!(c.port, 8080);
+        assert_eq!(c.db_isolation, "serializable");
+        assert_eq!(c.db_max_connections, 32);
+        assert_eq!(c.snapshot_interval_minutes, 15);
+        assert_eq!(c.hash_chain_alg, "sha256");
+        assert!(c.hash_chain_salt.is_none());
+        assert!(c.audit_event_log_url.is_none());
+        assert_eq!(c.max_entries_per_posting, 64);
+        assert_eq!(c.max_amount, 1_000_000_000_000);
+        assert_eq!(c.log_level, "info");
+        assert!(!c.db_url.is_empty());
+    }
+
+    #[test]
+    fn snapshot_interval_is_minutes_to_seconds() {
+        let mut c = Config::default();
+        c.snapshot_interval_minutes = 2;
+        assert_eq!(c.snapshot_interval(), Duration::from_secs(120));
+    }
+
+    #[test]
+    fn assert_isolation_accepts_serializable_variants() {
+        let mut c = Config::default();
+        assert!(c.assert_isolation().is_ok());
+        c.db_isolation = "SERIALIZABLE".to_string();
+        assert!(c.assert_isolation().is_ok());
+        c.db_isolation = "Serializable".to_string();
+        assert!(c.assert_isolation().is_ok());
+    }
+
+    #[test]
+    fn assert_isolation_rejects_other() {
+        let mut c = Config::default();
+        c.db_isolation = "read_committed".to_string();
+        let err = c.assert_isolation().unwrap_err();
+        assert!(err.contains("read_committed"));
+        assert!(err.contains("serializable"));
+    }
+
+    #[test]
+    fn from_env_reads_overrides() {
+        // Tests may run in parallel; use a mutex to serialize env mutation.
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _g = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+
+        // Save existing values to restore afterwards.
+        let keys = [
+            "PORT",
+            "DB_URL",
+            "DB_ISOLATION",
+            "DB_MAX_CONNECTIONS",
+            "SNAPSHOT_INTERVAL_MINUTES",
+            "HASH_CHAIN_ALG",
+            "HASH_CHAIN_SALT",
+            "AUDIT_EVENT_LOG_URL",
+            "MAX_ENTRIES_PER_POSTING",
+            "MAX_AMOUNT",
+            "LOG_LEVEL",
+        ];
+        let saved: Vec<(String, Option<String>)> = keys
+            .iter()
+            .map(|k| (k.to_string(), std::env::var(k).ok()))
+            .collect();
+
+        std::env::set_var("PORT", "9999");
+        std::env::set_var("DB_URL", "postgres://x/x");
+        std::env::set_var("DB_ISOLATION", "serializable");
+        std::env::set_var("DB_MAX_CONNECTIONS", "7");
+        std::env::set_var("SNAPSHOT_INTERVAL_MINUTES", "3");
+        std::env::set_var("HASH_CHAIN_ALG", "sha512");
+        std::env::set_var("HASH_CHAIN_SALT", "salty");
+        std::env::set_var("AUDIT_EVENT_LOG_URL", "http://log");
+        std::env::set_var("MAX_ENTRIES_PER_POSTING", "9");
+        std::env::set_var("MAX_AMOUNT", "12345");
+        std::env::set_var("LOG_LEVEL", "debug");
+        let c = Config::from_env();
+        assert_eq!(c.port, 9999);
+        assert_eq!(c.db_url, "postgres://x/x");
+        assert_eq!(c.db_isolation, "serializable");
+        assert_eq!(c.db_max_connections, 7);
+        assert_eq!(c.snapshot_interval_minutes, 3);
+        assert_eq!(c.hash_chain_alg, "sha512");
+        assert_eq!(c.hash_chain_salt.as_deref(), Some("salty"));
+        assert_eq!(c.audit_event_log_url.as_deref(), Some("http://log"));
+        assert_eq!(c.max_entries_per_posting, 9);
+        assert_eq!(c.max_amount, 12345);
+        assert_eq!(c.log_level, "debug");
+
+        // Restore so other tests are not affected.
+        for (k, v) in saved {
+            match v {
+                Some(val) => std::env::set_var(&k, &val),
+                None => std::env::remove_var(&k),
+            }
+        }
+    }
+
+    #[test]
+    fn from_env_ignores_invalid_numeric_overrides() {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _g = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+
+        let saved = std::env::var("PORT").ok();
+        std::env::set_var("PORT", "not-a-port");
+        let c = Config::from_env();
+        // Falls back to default port (8080).
+        assert_eq!(c.port, 8080);
+        match saved {
+            Some(v) => std::env::set_var("PORT", &v),
+            None => std::env::remove_var("PORT"),
+        }
+    }
+}

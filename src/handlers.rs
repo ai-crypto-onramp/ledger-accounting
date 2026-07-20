@@ -229,3 +229,170 @@ async fn verify_chain(State(store): State<Store>) -> Json<Value> {
         })),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use serde_json::{json, Value};
+    use tower::ServiceExt;
+
+    fn create_account_body(id: &str, type_name: &str, asset_class: &str) -> Value {
+        json!({
+            "account_id": id,
+            "type": type_name,
+            "asset_class": asset_class,
+            "label": format!("{}-{}", type_name, id),
+        })
+    }
+
+    async fn post_json(router: &axum::Router, uri: &str, body: Value) -> (StatusCode, Value) {
+        let res = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = res.status();
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let val: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, val)
+    }
+
+    async fn get_json(router: &axum::Router, uri: &str) -> (StatusCode, Value) {
+        let res = router
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = res.status();
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let val: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, val)
+    }
+
+    fn balanced_posting_body(posting_id: &str) -> Value {
+        json!({
+            "posting_id": posting_id,
+            "memo": "test",
+            "ref_tx_id": "tx1",
+            "entries": [
+                { "account_id": "uc", "direction": "DEBIT", "amount": 100, "asset": "USD" },
+                { "account_id": "op", "direction": "CREDIT", "amount": 100, "asset": "USD" }
+            ]
+        })
+    }
+
+    async fn setup_two_accounts(router: &axum::Router) {
+        let _ = post_json(
+            router,
+            "/v1/accounts",
+            create_account_body("uc", "user_custodial", "BOTH"),
+        )
+        .await;
+        let _ = post_json(
+            router,
+            "/v1/accounts",
+            create_account_body("op", "operational_fiat", "FIAT"),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn user_custodial_sum_route_returns_sum() {
+        let router = router(Store::new());
+        setup_two_accounts(&router).await;
+        let _ = post_json(&router, "/v1/postings", balanced_posting_body("ucs1")).await;
+        let (status, val) = get_json(&router, "/v1/reconciliation/user-custodial-sum?asset=USD").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(val["asset"], "USD");
+        assert_eq!(val["user_custodial_sum"], "100");
+    }
+
+    #[tokio::test]
+    async fn user_custodial_sum_route_default_asset_is_all() {
+        let router = router(Store::new());
+        setup_two_accounts(&router).await;
+        let _ = post_json(&router, "/v1/postings", balanced_posting_body("ucs2")).await;
+        let (status, val) = get_json(&router, "/v1/reconciliation/user-custodial-sum").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(val["asset"], "all");
+        assert_eq!(val["user_custodial_sum"], "100");
+    }
+
+    #[tokio::test]
+    async fn verify_chain_route_ok() {
+        let router = router(Store::new());
+        setup_two_accounts(&router).await;
+        let _ = post_json(&router, "/v1/postings", balanced_posting_body("vc1")).await;
+        let (status, val) = get_json(&router, "/v1/chain/verify").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(val["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn verify_chain_route_reports_break() {
+        let store = Store::new();
+        let _ = store.create_account(serde_json::from_value(create_account_body("uc", "user_custodial", "BOTH")).unwrap());
+        let _ = store.create_account(serde_json::from_value(create_account_body("op", "operational_fiat", "FIAT")).unwrap());
+        let _ = store.post(serde_json::from_value(balanced_posting_body("vc2")).unwrap());
+        {
+            let mut state = store.inner.lock();
+            if let Some(e) = state.entries.first_mut() {
+                e.this_hash = "deadbeef".to_string();
+            }
+        }
+        let router = router(store);
+        let (status, val) = get_json(&router, "/v1/chain/verify").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(val["ok"], false);
+        assert!(val["entry_id"].is_string());
+        assert!(val["reason"].as_str().unwrap().contains("mismatch"));
+    }
+
+    #[tokio::test]
+    async fn account_balance_default_asset_is_all() {
+        let router = router(Store::new());
+        setup_two_accounts(&router).await;
+        let _ = post_json(&router, "/v1/postings", balanced_posting_body("ab1")).await;
+        let (status, val) = get_json(&router, "/v1/accounts/uc/balance").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(val["asset"], "all");
+        assert_eq!(val["balance"], "100");
+    }
+
+    #[tokio::test]
+    async fn read_and_write_routers_build_independently() {
+        let store = Store::new();
+        let r = read_router(store.clone());
+        let w = write_router(store);
+        // Smoke test: hit healthz on read_router.
+        let res = r
+            .oneshot(Request::builder().uri("/healthz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        // And create an account via write_router.
+        let res = w
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/accounts")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&create_account_body("x", "user_custodial", "FIAT")).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+    }
+}

@@ -185,3 +185,283 @@ fn posting_to_pb(p: &crate::posting::PostingRecord) -> PbPostingRecord {
 pub fn server(store: Store, allowed_callers: Vec<String>) -> LedgerServer<LedgerGrpc> {
     LedgerServer::new(LedgerGrpc::new(store, allowed_callers))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tonic::metadata::MetadataMap;
+
+    fn store_with_account(id: &str, type_name: &str, asset_class: &str) -> Store {
+        let store = Store::new();
+        store
+            .create_account(serde_json::from_value(serde_json::json!({
+                "account_id": id,
+                "type": type_name,
+                "asset_class": asset_class,
+                "label": format!("{}-{}", type_name, id),
+            })).unwrap())
+            .unwrap();
+        store
+    }
+
+    fn balanced_posting(posting_id: &str) -> PostReq {
+        PostReq {
+            posting_id: posting_id.to_string(),
+            entries: vec![
+                crate::posting::EntryInput {
+                    account_id: "uc".to_string(),
+                    direction: "DEBIT".to_string(),
+                    amount: 100,
+                    asset: "USD".to_string(),
+                },
+                crate::posting::EntryInput {
+                    account_id: "op".to_string(),
+                    direction: "CREDIT".to_string(),
+                    amount: 100,
+                    asset: "USD".to_string(),
+                },
+            ],
+            memo: None,
+            ref_tx_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn authorize_rejects_missing_caller() {
+        let svc = LedgerGrpc::new(Store::new(), vec!["transaction-orchestrator".to_string()]);
+        assert!(svc.authorize(None).is_err());
+    }
+
+    #[tokio::test]
+    async fn authorize_rejects_unknown_caller() {
+        let svc = LedgerGrpc::new(Store::new(), vec!["transaction-orchestrator".to_string()]);
+        assert!(svc.authorize(Some("intruder")).is_err());
+    }
+
+    #[tokio::test]
+    async fn authorize_accepts_known_caller() {
+        let svc = LedgerGrpc::new(Store::new(), vec!["transaction-orchestrator".to_string()]);
+        assert!(svc.authorize(Some("transaction-orchestrator")).is_ok());
+    }
+
+    #[tokio::test]
+    async fn create_account_grpc_success_and_failure() {
+        let store = store_with_account("uc", "user_custodial", "BOTH");
+        let svc = LedgerGrpc::new(store, vec!["caller".to_string()]);
+
+        // Success path with authorized caller.
+        let mut req = Request::new(PbCreateAccountRequest {
+            account_id: Some("op".to_string()),
+            r#type: "operational_fiat".to_string(),
+            asset_class: "FIAT".to_string(),
+            label: "op".to_string(),
+            parent_id: None,
+        });
+        req.metadata_mut().insert("x-caller", "caller".parse().unwrap());
+        let resp = svc.create_account(req).await.unwrap();
+        assert_eq!(resp.into_inner().account_id, "op");
+
+        // Failure path: unknown account type with authorized caller.
+        let mut req2 = Request::new(PbCreateAccountRequest {
+            account_id: Some("bad".to_string()),
+            r#type: "bogus".to_string(),
+            asset_class: "FIAT".to_string(),
+            label: "bad".to_string(),
+            parent_id: None,
+        });
+        req2.metadata_mut().insert("x-caller", "caller".parse().unwrap());
+        assert!(svc.create_account(req2).await.is_err());
+
+        // Unauthorized: no caller header.
+        let req3 = Request::new(PbCreateAccountRequest {
+            account_id: Some("x".to_string()),
+            r#type: "user_custodial".to_string(),
+            asset_class: "FIAT".to_string(),
+            label: "x".to_string(),
+            parent_id: None,
+        });
+        assert!(svc.create_account(req3).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn post_posting_grpc_success_and_failure() {
+        let store = store_with_account("uc", "user_custodial", "BOTH");
+        store
+            .create_account(serde_json::from_value(serde_json::json!({
+                "account_id": "op",
+                "type": "operational_fiat",
+                "asset_class": "FIAT",
+                "label": "op",
+            })).unwrap())
+            .unwrap();
+        let svc = LedgerGrpc::new(store, vec!["caller".to_string()]);
+
+        let mut req = Request::new(PbPostingRequest {
+            posting_id: "p1".to_string(),
+            entries: vec![],
+            memo: None,
+            ref_tx_id: None,
+        });
+        req.metadata_mut().insert("x-caller", "caller".parse().unwrap());
+        // Empty entries -> error.
+        assert!(svc.post_posting(req).await.is_err());
+
+        // Authorized balanced post -> ok.
+        let mut req = Request::new(PbPostingRequest {
+            posting_id: "p1".to_string(),
+            entries: vec![
+                ledger::EntryInput { account_id: "uc".to_string(), direction: "DEBIT".to_string(), amount: 100, asset: "USD".to_string() },
+                ledger::EntryInput { account_id: "op".to_string(), direction: "CREDIT".to_string(), amount: 100, asset: "USD".to_string() },
+            ],
+            memo: None,
+            ref_tx_id: None,
+        });
+        req.metadata_mut().insert("x-caller", "caller".parse().unwrap());
+        let resp = svc.post_posting(req).await.unwrap().into_inner();
+        assert_eq!(resp.posting_id, "p1");
+        assert_eq!(resp.status, "POSTED");
+        assert_eq!(resp.entry_ids.len(), 2);
+
+        // Unauthorized caller.
+        let req = Request::new(PbPostingRequest {
+            posting_id: "p2".to_string(),
+            entries: vec![
+                ledger::EntryInput { account_id: "uc".to_string(), direction: "DEBIT".to_string(), amount: 100, asset: "USD".to_string() },
+                ledger::EntryInput { account_id: "op".to_string(), direction: "CREDIT".to_string(), amount: 100, asset: "USD".to_string() },
+            ],
+            memo: None,
+            ref_tx_id: None,
+        });
+        assert!(svc.post_posting(req).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_posting_grpc_found_and_missing() {
+        let store = store_with_account("uc", "user_custodial", "BOTH");
+        store
+            .create_account(serde_json::from_value(serde_json::json!({
+                "account_id": "op",
+                "type": "operational_fiat",
+                "asset_class": "FIAT",
+                "label": "op",
+            })).unwrap())
+            .unwrap();
+        store.post(balanced_posting("g1")).unwrap();
+        let svc = LedgerGrpc::new(store, vec!["caller".to_string()]);
+
+        let req = Request::new(GetPostingRequest { posting_id: "g1".to_string() });
+        let resp = svc.get_posting(req).await.unwrap().into_inner();
+        assert_eq!(resp.posting_id, "g1");
+        assert_eq!(resp.entries.len(), 2);
+
+        let req = Request::new(GetPostingRequest { posting_id: "missing".to_string() });
+        assert!(svc.get_posting(req).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_balance_grpc_found_and_missing() {
+        let store = store_with_account("uc", "user_custodial", "BOTH");
+        store
+            .create_account(serde_json::from_value(serde_json::json!({
+                "account_id": "op",
+                "type": "operational_fiat",
+                "asset_class": "FIAT",
+                "label": "op",
+            })).unwrap())
+            .unwrap();
+        store.post(balanced_posting("b1")).unwrap();
+        let svc = LedgerGrpc::new(store, vec!["caller".to_string()]);
+
+        let req = Request::new(GetBalanceRequest { account_id: "uc".to_string(), asset: Some("USD".to_string()) });
+        let resp = svc.get_balance(req).await.unwrap().into_inner();
+        assert_eq!(resp.account_id, "uc");
+        assert_eq!(resp.asset, "USD");
+        assert_eq!(resp.balance, "100");
+
+        // No asset -> "all".
+        let req = Request::new(GetBalanceRequest { account_id: "uc".to_string(), asset: None });
+        let resp = svc.get_balance(req).await.unwrap().into_inner();
+        assert_eq!(resp.asset, "all");
+
+        // Unknown account -> not found.
+        let req = Request::new(GetBalanceRequest { account_id: "nope".to_string(), asset: None });
+        assert!(svc.get_balance(req).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn verify_chain_grpc_ok_and_broken() {
+        let store = store_with_account("uc", "user_custodial", "BOTH");
+        store
+            .create_account(serde_json::from_value(serde_json::json!({
+                "account_id": "op",
+                "type": "operational_fiat",
+                "asset_class": "FIAT",
+                "label": "op",
+            })).unwrap())
+            .unwrap();
+        store.post(balanced_posting("v1")).unwrap();
+        let svc = LedgerGrpc::new(store.clone(), vec!["caller".to_string()]);
+
+        let req = Request::new(VerifyChainRequest {});
+        let resp = svc.verify_chain(req).await.unwrap().into_inner();
+        assert!(resp.ok);
+
+        // Tamper with a hash to break the chain.
+        {
+            let mut state = store.inner.lock();
+            if let Some(e) = state.entries.first_mut() {
+                e.this_hash = "deadbeef".to_string();
+            }
+        }
+        let req = Request::new(VerifyChainRequest {});
+        let resp = svc.verify_chain(req).await.unwrap().into_inner();
+        assert!(!resp.ok);
+        assert!(resp.entry_id.is_some());
+        assert!(resp.reason.is_some());
+    }
+
+    #[test]
+    fn server_constructs() {
+        let _ = server(Store::new(), vec!["caller".to_string()]);
+    }
+
+    #[test]
+    fn posting_to_pb_maps_fields() {
+        let rec = crate::posting::PostingRecord {
+            posting_id: "p1".to_string(),
+            ref_tx_id: Some("tx".to_string()),
+            memo: Some("m".to_string()),
+            status: "POSTED".to_string(),
+            hash_head: "hh".to_string(),
+            entries: vec![crate::posting::EntryRecord {
+                entry_id: "e1".to_string(),
+                posting_id: "p1".to_string(),
+                account_id: "uc".to_string(),
+                direction: "DEBIT".to_string(),
+                amount: 100,
+                asset: "USD".to_string(),
+                sequence_number: 1,
+                prev_hash: "prev".to_string(),
+                this_hash: "this".to_string(),
+                created_at: "1000".to_string(),
+            }],
+            created_at: "1000".to_string(),
+        };
+        let pb = posting_to_pb(&rec);
+        assert_eq!(pb.posting_id, "p1");
+        assert_eq!(pb.ref_tx_id.as_deref(), Some("tx"));
+        assert_eq!(pb.memo.as_deref(), Some("m"));
+        assert_eq!(pb.status, "POSTED");
+        assert_eq!(pb.hash_head, "hh");
+        assert_eq!(pb.entries.len(), 1);
+        assert_eq!(pb.entries[0].entry_id, "e1");
+        assert_eq!(pb.entries[0].amount, 100);
+        assert_eq!(pb.created_at, "1000");
+    }
+
+    // Silence unused import warning when MetadataMap isn't otherwise used.
+    #[test]
+    fn _metadata_map_drops() {
+        let _ = MetadataMap::new();
+    }
+}

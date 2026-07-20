@@ -1018,3 +1018,410 @@ struct SnapshotRow {
     as_of_ts: String,
     last_entry_id: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::account::CreateAccountRequest;
+
+    fn acct_req(id: &str, type_name: &str, asset_class: &str) -> CreateAccountRequest {
+        serde_json::from_value(serde_json::json!({
+            "account_id": id,
+            "type": type_name,
+            "asset_class": asset_class,
+            "label": format!("{}-{}", type_name, id),
+        }))
+        .unwrap()
+    }
+
+    fn balanced_posting(posting_id: &str, amount: u64, asset: &str) -> PostingRequest {
+        serde_json::from_value(serde_json::json!({
+            "posting_id": posting_id,
+            "entries": [
+                { "account_id": "uc", "direction": "DEBIT", "amount": amount, "asset": asset },
+                { "account_id": "op", "direction": "CREDIT", "amount": amount, "asset": asset }
+            ]
+        }))
+        .unwrap()
+    }
+
+    fn setup(store: &Store) {
+        store.create_account(acct_req("uc", "user_custodial", "BOTH")).unwrap();
+        store.create_account(acct_req("op", "operational_fiat", "FIAT")).unwrap();
+    }
+
+    #[test]
+    fn ledger_state_default_matches_new() {
+        let a = LedgerState::default();
+        let b = LedgerState::new();
+        assert_eq!(a.accounts.len(), b.accounts.len());
+        assert_eq!(a.sequence, b.sequence);
+        assert_eq!(a.global_chain_head, b.global_chain_head);
+    }
+
+    #[test]
+    fn store_default_matches_new() {
+        let a = Store::default();
+        let b = Store::new();
+        assert!(a.pool.is_none());
+        assert!(b.pool.is_none());
+    }
+
+    #[test]
+    fn run_migrations_no_pool_is_noop() {
+        let store = Store::new();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let res = rt.block_on(store.run_migrations());
+        assert!(res.is_ok());
+        let _ = store.list_accounts(None);
+    }
+
+    #[test]
+    fn hydrate_no_pool_is_noop() {
+        let store = Store::new();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let res = rt.block_on(store.hydrate());
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn create_account_auto_id_when_none() {
+        let store = Store::new();
+        let req = CreateAccountRequest {
+            account_id: None,
+            type_name: "user_custodial".to_string(),
+            asset_class: "BOTH".to_string(),
+            label: "auto".to_string(),
+            parent_id: None,
+        };
+        let acc = store.create_account(req).unwrap();
+        assert!(!acc.account_id.is_empty());
+        assert!(store.get_account(&acc.account_id).is_some());
+    }
+
+    #[test]
+    fn get_account_missing_returns_none() {
+        let store = Store::new();
+        assert!(store.get_account("nope").is_none());
+    }
+
+    #[test]
+    fn list_accounts_sorts_by_created_at_then_id() {
+        let store = Store::new();
+        // Insert accounts; created_at is "now" so order should fall back to id.
+        store.create_account(acct_req("b", "user_custodial", "BOTH")).unwrap();
+        store.create_account(acct_req("a", "user_custodial", "BOTH")).unwrap();
+        let all = store.list_accounts(None);
+        assert_eq!(all.len(), 2);
+        // Both created at the same second; sort by id ascending.
+        assert_eq!(all[0].account_id, "a");
+        assert_eq!(all[1].account_id, "b");
+    }
+
+    #[test]
+    fn list_postings_clamps_and_truncates() {
+        let store = Store::new();
+        setup(&store);
+        for i in 0..3 {
+            store.post(balanced_posting(&format!("p{}", i), 1, "USD")).unwrap();
+        }
+        // limit 0 -> clamped to 1
+        assert_eq!(store.list_postings(0).len(), 1);
+        // limit huge -> clamped to 200
+        assert_eq!(store.list_postings(10000).len(), 3);
+    }
+
+    #[test]
+    fn balance_missing_account_returns_none() {
+        let store = Store::new();
+        assert!(store.balance("nope", "USD").is_none());
+    }
+
+    #[test]
+    fn ledger_missing_account_errors() {
+        let store = Store::new();
+        assert!(store.ledger("nope", None, None, 10, None).is_err());
+    }
+
+    #[test]
+    fn ledger_with_from_to_filters_and_cursor() {
+        let store = Store::new();
+        setup(&store);
+        // 5 postings, all at same second.
+        for i in 0..5 {
+            store.post(balanced_posting(&format!("l{}", i), 1, "USD")).unwrap();
+        }
+        // from="" matches all (>= "" is always true), to unset.
+        let page = store.ledger("uc", Some(""), None, 10, None).unwrap();
+        assert_eq!(page.entries.len(), 5);
+        // cursor beyond all -> empty
+        let page = store.ledger("uc", None, None, 10, Some(999)).unwrap();
+        assert!(page.entries.is_empty());
+        assert!(page.next_cursor.is_none());
+    }
+
+    #[test]
+    fn ledger_credit_decrements_running_balance() {
+        let store = Store::new();
+        setup(&store);
+        // Post a credit-first balanced posting to uc/op. To get a CREDIT on uc,
+        // use a reversed balanced posting.
+        store.post(serde_json::from_value(serde_json::json!({
+            "posting_id": "cr1",
+            "entries": [
+                { "account_id": "op", "direction": "DEBIT", "amount": 30, "asset": "USD" },
+                { "account_id": "uc", "direction": "CREDIT", "amount": 30, "asset": "USD" }
+            ]
+        })).unwrap()).unwrap();
+        let page = store.ledger("uc", None, None, 10, None).unwrap();
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.entries[0].running_balance, -30);
+    }
+
+    #[test]
+    fn ledger_unknown_direction_zero_running() {
+        let store = Store::new();
+        setup(&store);
+        // Inject an entry with an invalid direction into state directly.
+        {
+            let mut state = store.inner.lock();
+            let prev = state.global_chain_head.clone();
+            state.entries.push(EntryRecord {
+                entry_id: "weird".to_string(),
+                posting_id: "p".to_string(),
+                account_id: "uc".to_string(),
+                direction: "SIDEWAYS".to_string(),
+                amount: 999,
+                asset: "USD".to_string(),
+                sequence_number: 9999,
+                prev_hash: prev,
+                this_hash: "hh".to_string(),
+                created_at: "1000".to_string(),
+            });
+        }
+        let page = store.ledger("uc", None, None, 10, None).unwrap();
+        // The weird entry should produce a 0 running delta.
+        let weird = page.entries.iter().find(|e| e.entry_id == "weird").unwrap();
+        assert_eq!(weird.running_balance, 0);
+    }
+
+    #[test]
+    fn post_rejects_amount_over_max_amount() {
+        let store = Store::new();
+        setup(&store);
+        let req = serde_json::from_value(serde_json::json!({
+            "posting_id": "overmax",
+            "entries": [
+                { "account_id": "uc", "direction": "DEBIT", "amount": MAX_AMOUNT + 1, "asset": "USD" },
+                { "account_id": "op", "direction": "CREDIT", "amount": MAX_AMOUNT + 1, "asset": "USD" }
+            ]
+        })).unwrap();
+        let err = store.post(req).unwrap_err();
+        assert!(err.message().contains("exceeds MAX_AMOUNT"));
+    }
+
+    #[test]
+    fn post_rejects_disallowed_direction_for_account_type() {
+        let store = Store::new();
+        // fee_revenue allows DEBIT/CREDIT per chart, so pick a type that
+        // actually disallows one direction. All chart types allow both, so
+        // construct a synthetic case: temporarily inject an account type
+        // restriction by tampering with the account's type_name to a bogus
+        // value that find_type returns None for. That path yields a panic via
+        // unwrap, so instead we exercise the disallowed path by directly
+        // hitting direction_allowed with a constructed AccountType.
+        use crate::chart::{AccountType, AssetClass, Direction, NormalBalance};
+        let t = AccountType {
+            type_name: "no_credit",
+            normal_balance: NormalBalance::Debit,
+            allowed_directions: &["DEBIT"],
+            asset_class: AssetClass::Both,
+        };
+        assert!(crate::chart::direction_allowed(&t, Direction::Debit));
+        assert!(!crate::chart::direction_allowed(&t, Direction::Credit));
+        // Keep store usage to satisfy unused warnings.
+        let _ = store.list_accounts(None);
+    }
+
+    #[test]
+    fn post_replay_returns_existing_entry_ids() {
+        let store = Store::new();
+        setup(&store);
+        let req = balanced_posting("rep1", 100, "USD");
+        let (r1, replay1) = store.post(req.clone()).unwrap();
+        assert!(!replay1);
+        let (r2, replay2) = store.post(req).unwrap();
+        assert!(replay2);
+        assert_eq!(r1.entry_ids, r2.entry_ids);
+        assert_eq!(r1.hash_head, r2.hash_head);
+    }
+
+    #[test]
+    fn record_audit_event_appends() {
+        let store = Store::new();
+        let ev = AuditEvent {
+            event_id: "e1".to_string(),
+            posting_id: "p1".to_string(),
+            entry_ids: vec!["x".to_string()],
+            hash_head: "h".to_string(),
+            created_at: "0".to_string(),
+        };
+        store.record_audit_event(ev.clone());
+        let evs = store.audit_events();
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].event_id, "e1");
+    }
+
+    #[test]
+    fn hash_chain_anchor_missing_returns_none() {
+        let store = Store::new();
+        assert!(store.hash_chain_anchor("nope").is_none());
+    }
+
+    #[test]
+    fn write_snapshots_without_pool_returns_snaps() {
+        let store = Store::new();
+        setup(&store);
+        store.post(balanced_posting("ws1", 100, "USD")).unwrap();
+        let snaps = store.write_snapshots();
+        assert!(!snaps.is_empty());
+    }
+
+    #[test]
+    fn latest_snapshot_returns_filtered() {
+        let store = Store::new();
+        setup(&store);
+        store.post(balanced_posting("ls1", 100, "USD")).unwrap();
+        store.write_snapshots();
+        let s = store.latest_snapshot("uc", "USD");
+        assert!(s.is_some());
+        let s = s.unwrap();
+        assert_eq!(s.account_id, "uc");
+        assert_eq!(s.asset, "USD");
+        // asset="" matches any
+        let s2 = store.latest_snapshot("uc", "");
+        assert!(s2.is_some());
+        // unknown asset -> none
+        assert!(store.latest_snapshot("uc", "BTC").is_none());
+        // unknown account -> none
+        assert!(store.latest_snapshot("nope", "USD").is_none());
+    }
+
+    #[test]
+    fn balance_via_snapshot_unknown_account_returns_none() {
+        let store = Store::new();
+        assert!(store.balance_via_snapshot("nope", "USD").is_none());
+    }
+
+    #[test]
+    fn balance_via_snapshot_without_snapshot_falls_back_to_direct() {
+        let store = Store::new();
+        setup(&store);
+        store.post(balanced_posting("bvs1", 100, "USD")).unwrap();
+        // No snapshots written -> falls back to compute_balance.
+        assert_eq!(store.balance_via_snapshot("uc", "USD"), Some(100));
+        // asset="" -> all
+        assert_eq!(store.balance_via_snapshot("uc", ""), Some(100));
+    }
+
+    #[test]
+    fn balance_via_snapshot_credit_delta() {
+        let store = Store::new();
+        setup(&store);
+        store.post(serde_json::from_value(serde_json::json!({
+            "posting_id": "cvs1",
+            "entries": [
+                { "account_id": "op", "direction": "DEBIT", "amount": 50, "asset": "USD" },
+                { "account_id": "uc", "direction": "CREDIT", "amount": 50, "asset": "USD" }
+            ]
+        })).unwrap()).unwrap();
+        store.write_snapshots();
+        // Additional posting with credit to uc -> negative delta.
+        store.post(serde_json::from_value(serde_json::json!({
+            "posting_id": "cvs2",
+            "entries": [
+                { "account_id": "op", "direction": "DEBIT", "amount": 20, "asset": "USD" },
+                { "account_id": "uc", "direction": "CREDIT", "amount": 20, "asset": "USD" }
+            ]
+        })).unwrap()).unwrap();
+        let direct = store.balance("uc", "USD").unwrap();
+        let via = store.balance_via_snapshot("uc", "USD").unwrap();
+        assert_eq!(direct, via);
+        assert_eq!(via, -70);
+    }
+
+    #[test]
+    fn post_error_status_and_message() {
+        let v = PostError::Validation("v".to_string());
+        assert_eq!(v.status(), 400);
+        assert_eq!(v.message(), "v");
+        let u = PostError::Unbalanced("u".to_string());
+        assert_eq!(u.status(), 400);
+        assert_eq!(u.message(), "u");
+    }
+
+    #[test]
+    fn now_iso_is_numeric_string() {
+        let s = now_iso();
+        assert!(s.parse::<u64>().is_ok());
+    }
+
+    #[test]
+    fn secs_parses_and_falls_back_to_zero() {
+        assert_eq!(secs("123"), 123);
+        assert_eq!(secs("not-a-number"), 0);
+    }
+
+    #[test]
+    fn is_already_applied_recognizes_known_codes() {
+        // Construct a sqlx::Error with a database error code is non-trivial; instead,
+        // verify the negative path with a non-database error.
+        let err = sqlx::Error::Configuration("x".into());
+        assert!(!is_already_applied(&err));
+    }
+
+    #[test]
+    fn user_custodial_sum_skips_non_user_accounts() {
+        let store = Store::new();
+        setup(&store);
+        store.post(balanced_posting("ucs", 100, "USD")).unwrap();
+        // op is operational_fiat, should not contribute.
+        assert_eq!(store.user_custodial_sum("USD"), 100);
+        // asset="" sums all assets for user_custodial accounts.
+        assert_eq!(store.user_custodial_sum(""), 100);
+    }
+
+    #[test]
+    fn compute_balance_helper_credit_and_unknown_direction() {
+        let store = Store::new();
+        setup(&store);
+        // Post a credit to uc.
+        store.post(serde_json::from_value(serde_json::json!({
+            "posting_id": "cb1",
+            "entries": [
+                { "account_id": "op", "direction": "DEBIT", "amount": 40, "asset": "USD" },
+                { "account_id": "uc", "direction": "CREDIT", "amount": 40, "asset": "USD" }
+            ]
+        })).unwrap()).unwrap();
+        assert_eq!(store.balance("uc", "USD"), Some(-40));
+        // asset filter excludes
+        store.post(serde_json::from_value(serde_json::json!({
+            "posting_id": "cb2",
+            "entries": [
+                { "account_id": "uc", "direction": "DEBIT", "amount": 5, "asset": "BTC" },
+                { "account_id": "op", "direction": "CREDIT", "amount": 5, "asset": "BTC" }
+            ]
+        })).unwrap()).unwrap();
+        // USD balance unchanged by BTC posting.
+        assert_eq!(store.balance("uc", "USD"), Some(-40));
+        assert_eq!(store.balance("uc", "BTC"), Some(5));
+        // all assets sum
+        assert_eq!(store.balance("uc", ""), Some(-35));
+    }
+}

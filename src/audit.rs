@@ -31,32 +31,44 @@ impl std::fmt::Debug for ArcKafkaAuditSink {
 
 impl Clone for ArcKafkaAuditSink {
     fn clone(&self) -> Self {
-        Self { producer: self.producer.clone() }
+        Self {
+            producer: self.producer.clone(),
+        }
     }
 }
 
 impl AuditSink {
     pub fn new(kafka: Option<ArcKafkaAuditSink>) -> Self {
-        Self { kafka: kafka.map(std::sync::Arc::new) }
+        Self {
+            kafka: kafka.map(std::sync::Arc::new),
+        }
     }
 
     pub fn from_env() -> anyhow::Result<Self> {
-        let brokers = std::env::var("KAFKA_BROKERS").ok().filter(|v| !v.is_empty());
-        let dev_mode = std::env::var("DEV_MODE").ok().map_or(false, |v| matches!(v.as_str(), "1" | "true" | "yes" | "on"));
+        let brokers = std::env::var("KAFKA_BROKERS")
+            .ok()
+            .filter(|v| !v.is_empty());
+        let dev_mode = std::env::var("DEV_MODE")
+            .ok()
+            .map_or(false, |v| matches!(v.as_str(), "1" | "true" | "yes" | "on"));
         match brokers {
             Some(b) => {
                 let producer: rdkafka::producer::FutureProducer = rdkafka::ClientConfig::new()
                     .set("bootstrap.servers", b)
                     .set("message.timeout.ms", "5000")
                     .create()?;
-                Ok(Self { kafka: Some(std::sync::Arc::new(ArcKafkaAuditSink { producer })) })
+                Ok(Self {
+                    kafka: Some(std::sync::Arc::new(ArcKafkaAuditSink { producer })),
+                })
             }
             None => {
                 if dev_mode {
                     eprintln!("[audit] KAFKA_BROKERS unset and DEV_MODE=1; audit records will be logged to stderr only");
                     Ok(Self { kafka: None })
                 } else {
-                    Err(anyhow::anyhow!("KAFKA_BROKERS unset and DEV_MODE not set; cannot start audit producer"))
+                    Err(anyhow::anyhow!(
+                        "KAFKA_BROKERS unset and DEV_MODE not set; cannot start audit producer"
+                    ))
                 }
             }
         }
@@ -90,12 +102,17 @@ impl AuditSink {
                 use std::time::Duration;
                 let _ = producer
                     .send(
-                        FutureRecord::to("audit.v1").key(&key).payload(&envelope_bytes),
+                        FutureRecord::to("audit.v1")
+                            .key(&key)
+                            .payload(&envelope_bytes),
                         Duration::from_secs(5),
                     )
                     .await;
             });
-        } else if std::env::var("DEV_MODE").ok().map_or(false, |v| matches!(v.as_str(), "1" | "true" | "yes" | "on")) {
+        } else if std::env::var("DEV_MODE")
+            .ok()
+            .map_or(false, |v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        {
             eprintln!(
                 "[audit] would post event {} for posting {} to audit.v1",
                 event.event_id, event.posting_id

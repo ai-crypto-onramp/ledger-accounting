@@ -1,13 +1,64 @@
 use ledger_accounting::audit;
+use ledger_accounting::authtoken;
 use ledger_accounting::config;
 use ledger_accounting::grpc;
 use ledger_accounting::handlers;
 use ledger_accounting::store::Store;
+use opentelemetry::{global, trace::TracerProvider as _, KeyValue};
+use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::{runtime::Tokio, Resource};
 use tonic::transport::Server as TonicServer;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{fmt, registry, EnvFilter};
+
+fn init_tracing() {
+    let fmt_layer = fmt::layer();
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    let otlp_layer = endpoint.and_then(|ep| {
+        let exporter = opentelemetry_otlp::SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(&ep)
+            .build()
+            .ok()?;
+        let provider = opentelemetry_sdk::trace::TracerProvider::builder()
+            .with_batch_exporter(exporter, Tokio)
+            .with_resource(Resource::new([
+                KeyValue::new(
+                    "service.name",
+                    std::env::var("OTEL_SERVICE_NAME")
+                        .unwrap_or_else(|_| "ledger-accounting".into()),
+                ),
+                KeyValue::new("service.namespace", "ai-crypto-onramp"),
+                KeyValue::new("deployment.environment", "dev"),
+            ]))
+            .build();
+        let tracer = provider.tracer("ledger-accounting");
+        global::set_tracer_provider(provider);
+        Some(tracing_opentelemetry::layer().with_tracer(tracer))
+    });
+    if let Some(layer) = otlp_layer {
+        registry().with(filter).with(fmt_layer).with(layer).init();
+    } else {
+        registry().with(filter).with(fmt_layer).init();
+    }
+}
 
 #[allow(dead_code)]
 fn app() -> axum::Router {
-    handlers::router(Store::new())
+    if cfg!(test) && std::env::var("DEV_MODE").is_err() {
+        std::env::set_var("DEV_MODE", "1");
+    }
+    let store = Store::new();
+    let secret = authtoken::secret_from_env();
+    let mut router = handlers::router(store);
+    if let Some(s) = secret.clone() {
+        router = router.layer(axum::Extension(authtoken::SharedSecret(s)));
+    }
+    router.layer(axum::middleware::from_fn(authtoken::require_token))
 }
 
 #[allow(dead_code)]
@@ -52,6 +103,8 @@ fn verify_chain_at_startup(store: &Store) {
 
 #[tokio::main]
 async fn main() {
+    init_tracing();
+
     let cfg = config::Config::from_env();
     if let Err(e) = cfg.assert_isolation() {
         eprintln!("[boot] {}", e);
@@ -109,9 +162,13 @@ async fn main() {
     });
 
     let listener = tokio::net::TcpListener::bind(rest_addr).await.unwrap();
-    axum::serve(listener, handlers::router(rest_store))
-        .await
-        .unwrap();
+    let secret = authtoken::secret_from_env();
+    let mut rest_router = handlers::router(rest_store);
+    if let Some(s) = secret.clone() {
+        rest_router = rest_router.layer(axum::Extension(authtoken::SharedSecret(s)));
+    }
+    let rest_router = rest_router.layer(axum::middleware::from_fn(authtoken::require_token));
+    axum::serve(listener, rest_router).await.unwrap();
 }
 
 #[cfg(test)]

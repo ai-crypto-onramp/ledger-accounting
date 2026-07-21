@@ -74,9 +74,14 @@ pub fn canonical_bytes(
     .into_bytes()
 }
 
-pub fn compute_hash(prev_hash: &str, canonical: &[u8]) -> String {
+/// Computes the SHA-256 hash of `prev_hash || salt || canonical`.
+/// The salt is mixed between the previous hash and the canonical payload so
+/// that anyone with DB write access but without the salt cannot forge a
+/// consistent chain.
+pub fn compute_hash(prev_hash: &str, salt: &str, canonical: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(prev_hash.as_bytes());
+    hasher.update(salt.as_bytes());
     hasher.update(canonical);
     hex::encode(hasher.finalize())
 }

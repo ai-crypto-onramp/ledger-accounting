@@ -138,8 +138,7 @@ impl Ledger for LedgerGrpc {
         &self,
         _req: Request<VerifyChainRequest>,
     ) -> Result<Response<VerifyChainResponse>, Status> {
-        let state = self.store.inner.lock();
-        let result = crate::hashchain::verify_chain(&state);
+        let result = self.store.verify_chain();
         match result {
             Ok(()) => Ok(Response::new(VerifyChainResponse {
                 ok: true,

@@ -17,6 +17,8 @@ pub const MIGRATION_INIT_SCHEMA: &str =
     include_str!("../migrations/20240101000001_init_schema.sql");
 pub const MIGRATION_SET_SERIALIZABLE: &str =
     include_str!("../migrations/20240101000002_set_serializable.sql");
+pub const MIGRATION_IMMUTABLE_ENTRIES: &str =
+    include_str!("../migrations/20240101000003_restore_immutable_entries.sql");
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AuditEvent {
@@ -72,6 +74,7 @@ pub struct Store {
     pub inner: Arc<Mutex<LedgerState>>,
     pub pool: Option<sqlx::PgPool>,
     pub audit_sink: Option<std::sync::Arc<crate::audit::AuditSink>>,
+    pub salt: String,
 }
 
 impl Store {
@@ -80,6 +83,7 @@ impl Store {
             inner: Arc::new(Mutex::new(LedgerState::new())),
             pool: None,
             audit_sink: None,
+            salt: String::new(),
         }
     }
 
@@ -88,7 +92,22 @@ impl Store {
             inner: Arc::new(Mutex::new(LedgerState::new())),
             pool: Some(pool),
             audit_sink: None,
+            salt: String::new(),
         }
+    }
+
+    pub fn with_pool_and_salt(pool: sqlx::PgPool, salt: String) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(LedgerState::new())),
+            pool: Some(pool),
+            audit_sink: None,
+            salt,
+        }
+    }
+
+    pub fn with_salt(mut self, salt: String) -> Self {
+        self.salt = salt;
+        self
     }
 
     pub fn with_audit_sink(mut self, sink: crate::audit::AuditSink) -> Self {
@@ -102,6 +121,14 @@ impl Store {
             .connect(db_url)
             .await?;
         Ok(Self::with_pool(pool))
+    }
+
+    pub async fn connect_with_salt(db_url: &str, salt: String) -> Result<Self, sqlx::Error> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(16)
+            .connect(db_url)
+            .await?;
+        Ok(Self::with_pool_and_salt(pool, salt))
     }
 
     pub async fn run_migrations(&self) -> Result<(), String> {
@@ -123,6 +150,15 @@ impl Store {
                 return Ok(());
             }
             return Err(format!("migration set_serializable failed: {}", e));
+        }
+        if let Err(e) = sqlx::raw_sql(MIGRATION_IMMUTABLE_ENTRIES)
+            .execute(pool)
+            .await
+        {
+            if is_already_applied(&e) {
+                return Ok(());
+            }
+            return Err(format!("migration immutable_entries failed: {}", e));
         }
         Ok(())
     }
@@ -289,14 +325,8 @@ impl Store {
     pub fn create_account(&self, req: CreateAccountRequest) -> Result<Account, String> {
         let (type_name, _asset_class) = crate::account::validate(&req)?;
 
-        let mut state = self.inner.lock();
         let account_id = match req.account_id.clone() {
-            Some(id) => {
-                if state.accounts.contains_key(&id) {
-                    return Err(format!("account already exists: {}", id));
-                }
-                id
-            }
+            Some(id) => id,
             None => uuid::Uuid::now_v7().to_string(),
         };
 
@@ -310,13 +340,11 @@ impl Store {
             status: "ACTIVE".to_string(),
             created_at: now,
         };
-        state.accounts.insert(account_id, account.clone());
-        drop(state);
 
         if let Some(pool) = &self.pool {
             let mut tx =
                 block_on(pool.begin()).map_err(|e| format!("create_account: begin tx: {}", e))?;
-            block_on(
+            let inserted = block_on(
                 sqlx::query(
                     "INSERT INTO accounts (account_id, type_name, asset_class, label, parent_id, status, created_at, updated_at)
                  VALUES ($1, $2, $3, $4, $5, 'ACTIVE', to_timestamp($6), to_timestamp($6))
@@ -331,51 +359,172 @@ impl Store {
                 .execute(&mut *tx),
             )
             .map_err(|e| format!("create_account: insert: {}", e))?;
+            if inserted.rows_affected() == 0 {
+                drop(tx);
+                return Err(format!("account already exists: {}", account.account_id));
+            }
             block_on(tx.commit()).map_err(|e| format!("create_account: commit: {}", e))?;
+        }
+
+        {
+            let mut state = self.inner.lock();
+            if state.accounts.contains_key(&account_id) {
+                return Err(format!("account already exists: {}", account_id));
+            }
+            state.accounts.insert(account_id, account.clone());
         }
 
         Ok(account)
     }
 
     pub fn get_account(&self, account_id: &str) -> Option<Account> {
-        self.inner.lock().accounts.get(account_id).cloned()
+        if let Some(pool) = &self.pool {
+            let row: Option<AccountRow> = block_on(
+                sqlx::query_as::<_, AccountRow>(
+                    "SELECT account_id, type_name AS type_field, asset_class, label, parent_id, status, floor(extract(epoch from created_at))::bigint::text AS created_at FROM accounts WHERE account_id = $1",
+                )
+                .bind(account_id)
+                .fetch_optional(pool),
+            )
+            .ok()?;
+            row.map(|a| Account {
+                account_id: a.account_id,
+                type_name: a.type_field,
+                asset_class: a.asset_class,
+                label: a.label,
+                parent_id: a.parent_id,
+                status: a.status,
+                created_at: a.created_at,
+            })
+        } else {
+            self.inner.lock().accounts.get(account_id).cloned()
+        }
     }
 
     pub fn list_accounts(&self, type_filter: Option<&str>) -> Vec<Account> {
-        let state = self.inner.lock();
-        let mut out: Vec<Account> = state
-            .accounts
-            .values()
-            .filter(|a| type_filter.is_none_or(|t| a.type_name == t))
-            .cloned()
-            .collect();
-        out.sort_by(|a, b| {
-            a.created_at
-                .cmp(&b.created_at)
-                .then_with(|| a.account_id.cmp(&b.account_id))
-        });
-        out
+        if let Some(pool) = &self.pool {
+            let rows: Vec<AccountRow> = match block_on(sqlx::query_as::<_, AccountRow>(
+                "SELECT account_id, type_name AS type_field, asset_class, label, parent_id, status, floor(extract(epoch from created_at))::bigint::text AS created_at FROM accounts ORDER BY created_at, account_id",
+            )
+            .fetch_all(pool)) {
+                Ok(r) => r,
+                Err(_) => return Vec::new(),
+            };
+            let mut out: Vec<Account> = rows
+                .into_iter()
+                .filter(|a| type_filter.is_none_or(|t| a.type_field == t))
+                .map(|a| Account {
+                    account_id: a.account_id,
+                    type_name: a.type_field,
+                    asset_class: a.asset_class,
+                    label: a.label,
+                    parent_id: a.parent_id,
+                    status: a.status,
+                    created_at: a.created_at,
+                })
+                .collect();
+            out.sort_by(|a, b| {
+                a.created_at
+                    .cmp(&b.created_at)
+                    .then_with(|| a.account_id.cmp(&b.account_id))
+            });
+            out
+        } else {
+            let state = self.inner.lock();
+            let mut out: Vec<Account> = state
+                .accounts
+                .values()
+                .filter(|a| type_filter.is_none_or(|t| a.type_name == t))
+                .cloned()
+                .collect();
+            out.sort_by(|a, b| {
+                a.created_at
+                    .cmp(&b.created_at)
+                    .then_with(|| a.account_id.cmp(&b.account_id))
+            });
+            out
+        }
     }
 
     pub fn list_postings(&self, limit: usize) -> Vec<PostingRecord> {
-        let state = self.inner.lock();
-        let limit = limit.clamp(1, 200);
-        let mut out: Vec<PostingRecord> = state.postings.values().cloned().collect();
-        out.sort_by(|a, b| {
-            a.created_at
-                .cmp(&b.created_at)
-                .then_with(|| a.posting_id.cmp(&b.posting_id))
-        });
-        out.truncate(limit);
-        out
+        let limit = limit.clamp(1, 200) as i64;
+        if let Some(pool) = &self.pool {
+            let postings: Vec<PostingRow> = match block_on(sqlx::query_as::<_, PostingRow>(
+                "SELECT posting_id, ref_tx_id, memo, status, hash_chain_head, floor(extract(epoch from created_at))::bigint::text AS created_at FROM postings ORDER BY created_at, posting_id LIMIT $1",
+            )
+            .bind(limit)
+            .fetch_all(pool)) {
+                Ok(p) => p,
+                Err(_) => return Vec::new(),
+            };
+            let mut out = Vec::with_capacity(postings.len());
+            for p in postings {
+                let entries: Vec<EntryRow> = block_on(
+                    sqlx::query_as::<_, EntryRow>(
+                        "SELECT entry_id, posting_id, account_id, direction, amount::text AS amount, asset, sequence_number, prev_hash, this_hash, floor(extract(epoch from created_at))::bigint::text AS created_at FROM entries WHERE posting_id = $1 ORDER BY sequence_number",
+                    )
+                    .bind(&p.posting_id)
+                    .fetch_all(pool),
+                )
+                .map_err(|_| ())
+                .unwrap_or_default();
+                let rec_entries = entries
+                    .into_iter()
+                    .map(|e| EntryRecord {
+                        entry_id: e.entry_id,
+                        posting_id: e.posting_id,
+                        account_id: e.account_id,
+                        direction: e.direction,
+                        amount: e.amount.parse().unwrap_or(0),
+                        asset: e.asset,
+                        sequence_number: e.sequence_number as u64,
+                        prev_hash: e.prev_hash,
+                        this_hash: e.this_hash,
+                        created_at: e.created_at,
+                    })
+                    .collect();
+                out.push(PostingRecord {
+                    posting_id: p.posting_id,
+                    ref_tx_id: p.ref_tx_id,
+                    memo: p.memo,
+                    status: p.status,
+                    hash_head: p.hash_chain_head,
+                    entries: rec_entries,
+                    created_at: p.created_at,
+                });
+            }
+            out
+        } else {
+            let state = self.inner.lock();
+            let mut out: Vec<PostingRecord> = state.postings.values().cloned().collect();
+            out.sort_by(|a, b| {
+                a.created_at
+                    .cmp(&b.created_at)
+                    .then_with(|| a.posting_id.cmp(&b.posting_id))
+            });
+            out.truncate(limit as usize);
+            out
+        }
     }
 
     pub fn balance(&self, account_id: &str, asset: &str) -> Option<i128> {
-        let state = self.inner.lock();
-        if !state.accounts.contains_key(account_id) {
-            return None;
+        if let Some(pool) = &self.pool {
+            let exists: Option<(String,)> = block_on(
+                sqlx::query_as("SELECT account_id FROM accounts WHERE account_id = $1")
+                    .bind(account_id)
+                    .fetch_optional(pool),
+            )
+            .ok()?;
+            exists.as_ref()?;
+            let bal = balance_from_db(pool, account_id, asset)?;
+            Some(bal)
+        } else {
+            let state = self.inner.lock();
+            if !state.accounts.contains_key(account_id) {
+                return None;
+            }
+            Some(compute_balance(&state, account_id, asset))
         }
-        Some(compute_balance(&state, account_id, asset))
     }
 
     pub fn ledger(
@@ -386,12 +535,23 @@ impl Store {
         limit: usize,
         cursor: Option<u64>,
     ) -> Result<LedgerPage, String> {
+        let limit = limit.clamp(1, 200);
+        if let Some(pool) = &self.pool {
+            let exists: Option<(String,)> = block_on(
+                sqlx::query_as("SELECT account_id FROM accounts WHERE account_id = $1")
+                    .bind(account_id)
+                    .fetch_optional(pool),
+            )
+            .map_err(|e| format!("ledger: account lookup: {}", e))?;
+            if exists.is_none() {
+                return Err(format!("account not found: {}", account_id));
+            }
+            return ledger_page_from_db(pool, account_id, from, to, limit, cursor);
+        }
         let state = self.inner.lock();
         if !state.accounts.contains_key(account_id) {
             return Err(format!("account not found: {}", account_id));
         }
-        let limit = limit.clamp(1, 200);
-
         let mut entries: Vec<&EntryRecord> = state
             .entries
             .iter()
@@ -459,25 +619,6 @@ impl Store {
             )));
         }
 
-        let mut state = self.inner.lock();
-
-        if state.postings.contains_key(&req.posting_id) {
-            let existing = state.postings.get(&req.posting_id).unwrap().clone();
-            return Ok((
-                PostingResponse {
-                    posting_id: existing.posting_id,
-                    status: existing.status,
-                    entry_ids: existing
-                        .entries
-                        .iter()
-                        .map(|e| e.entry_id.clone())
-                        .collect(),
-                    hash_head: existing.hash_head,
-                },
-                true,
-            ));
-        }
-
         for e in &req.entries {
             if e.amount == 0 {
                 return Err(PostError::Validation("amount must be > 0".into()));
@@ -508,6 +649,329 @@ impl Store {
             entries_parsed.push((e.account_id.clone(), dir, e.amount, e.asset.clone()));
         }
 
+        let mut per_asset: HashMap<String, (i128, i128)> = HashMap::new();
+        for (_account_id, dir, amount, asset) in &entries_parsed {
+            let entry = per_asset.entry(asset.clone()).or_insert((0, 0));
+            match dir {
+                Direction::Debit => entry.0 += *amount as i128,
+                Direction::Credit => entry.1 += *amount as i128,
+            }
+        }
+        for (asset, (debits, credits)) in &per_asset {
+            if debits != credits {
+                return Err(PostError::Unbalanced(format!(
+                    "asset {} unbalanced: debits={} credits={}",
+                    asset, debits, credits
+                )));
+            }
+        }
+
+        if self.pool.is_some() {
+            self.post_via_db(req, entries_parsed)
+        } else {
+            self.post_via_memory(req, entries_parsed)
+        }
+    }
+
+    fn post_via_db(
+        &self,
+        req: PostingRequest,
+        entries_parsed: Vec<(String, Direction, u64, String)>,
+    ) -> Result<(PostingResponse, bool), PostError> {
+        let pool = self.pool.as_ref().unwrap();
+
+        // Idempotency / replay: DB is source of truth.
+        let existing: Option<PostingRow> = block_on(
+            sqlx::query_as::<_, PostingRow>(
+                "SELECT posting_id, ref_tx_id, memo, status, hash_chain_head, floor(extract(epoch from created_at))::bigint::text AS created_at FROM postings WHERE posting_id = $1",
+            )
+            .bind(&req.posting_id)
+            .fetch_optional(pool),
+        )
+        .map_err(|e| PostError::Validation(format!("post: check existing: {}", e)))?;
+        if let Some(p) = existing {
+            let entries: Vec<EntryRow> = block_on(
+                sqlx::query_as::<_, EntryRow>(
+                    "SELECT entry_id, posting_id, account_id, direction, amount::text AS amount, asset, sequence_number, prev_hash, this_hash, floor(extract(epoch from created_at))::bigint::text AS created_at FROM entries WHERE posting_id = $1 ORDER BY sequence_number",
+                )
+                .bind(&req.posting_id)
+                .fetch_all(pool),
+            )
+            .map_err(|e| PostError::Validation(format!("post: fetch existing entries: {}", e)))?;
+            let entry_ids: Vec<String> = entries.iter().map(|e| e.entry_id.clone()).collect();
+            return Ok((
+                PostingResponse {
+                    posting_id: p.posting_id,
+                    status: p.status,
+                    entry_ids,
+                    hash_head: p.hash_chain_head,
+                },
+                true,
+            ));
+        }
+
+        // Account existence + active status + direction validation.
+        for (account_id, _dir, _amount, _asset) in &entries_parsed {
+            let row: Option<(String, String)> = block_on(
+                sqlx::query_as("SELECT account_id, status FROM accounts WHERE account_id = $1")
+                    .bind(account_id)
+                    .fetch_optional(pool),
+            )
+            .map_err(|e| PostError::Validation(format!("post: account lookup: {}", e)))?;
+            match row {
+                Some((_id, status)) => {
+                    if status != "ACTIVE" {
+                        return Err(PostError::Validation(format!(
+                            "account not active: {}",
+                            account_id
+                        )));
+                    }
+                }
+                None => {
+                    return Err(PostError::Validation(format!(
+                        "account not found: {}",
+                        account_id
+                    )));
+                }
+            }
+        }
+        for (account_id, dir, _amount, _asset) in &entries_parsed {
+            let row: Option<(String,)> = block_on(
+                sqlx::query_as("SELECT type_name FROM accounts WHERE account_id = $1")
+                    .bind(account_id)
+                    .fetch_optional(pool),
+            )
+            .map_err(|e| PostError::Validation(format!("post: type lookup: {}", e)))?;
+            let type_name = row
+                .ok_or_else(|| PostError::Validation(format!("account not found: {}", account_id)))?
+                .0;
+            let account_type = chart::find_type(&type_name).ok_or_else(|| {
+                PostError::Validation(format!("unknown account type: {}", type_name))
+            })?;
+            if !chart::direction_allowed(account_type, *dir) {
+                return Err(PostError::Validation(format!(
+                    "direction {:?} not allowed for type {}",
+                    dir, type_name
+                )));
+            }
+        }
+
+        let now = now_iso();
+        let prev_hash_initial =
+            last_entry_hash_from_db(pool).unwrap_or_else(|| GENESIS_HASH.to_string());
+
+        let mut prev_hash = prev_hash_initial.clone();
+        let mut entry_ids: Vec<String> = Vec::new();
+        let mut created_entries: Vec<EntryRecord> = Vec::new();
+
+        let salt = self.salt.clone();
+        for (account_id, dir, amount, asset) in entries_parsed {
+            let entry_id = uuid::Uuid::now_v7().to_string();
+            let canonical = posting::canonical_bytes(
+                &prev_hash,
+                &entry_id,
+                &account_id,
+                dir,
+                amount,
+                &asset,
+                &now,
+            );
+            let this_hash = posting::compute_hash(&prev_hash, &salt, &canonical);
+            let record = EntryRecord {
+                entry_id: entry_id.clone(),
+                posting_id: req.posting_id.clone(),
+                account_id,
+                direction: match dir {
+                    Direction::Debit => "DEBIT".to_string(),
+                    Direction::Credit => "CREDIT".to_string(),
+                },
+                amount,
+                asset,
+                sequence_number: 0, // assigned below from DB
+                prev_hash: prev_hash.clone(),
+                this_hash: this_hash.clone(),
+                created_at: now.clone(),
+            };
+            entry_ids.push(entry_id.clone());
+            created_entries.push(record);
+            prev_hash = this_hash;
+        }
+
+        let hash_head = prev_hash.clone();
+        let global_sequence_head = hash_head.clone();
+
+        let mut tx = block_on(pool.begin())
+            .map_err(|e| PostError::Validation(format!("post: begin tx: {}", e)))?;
+        let inserted_posting = block_on(
+            sqlx::query(
+                "INSERT INTO postings (posting_id, ref_tx_id, memo, status, hash_chain_head, created_at, updated_at)
+                 VALUES ($1, $2, $3, 'POSTED', $4, to_timestamp($5), to_timestamp($5))
+                 ON CONFLICT (posting_id) DO NOTHING",
+            )
+            .bind(&req.posting_id)
+            .bind(req.ref_tx_id.as_ref())
+            .bind(req.memo.as_ref())
+            .bind(&hash_head)
+            .bind(secs(&now))
+            .execute(&mut *tx),
+        )
+        .map_err(|e| PostError::Validation(format!("post: insert posting: {}", e)))?;
+        if inserted_posting.rows_affected() == 0 {
+            // Race: another replica inserted first. Roll back our tx and
+            // return the existing record from DB.
+            drop(tx);
+            let existing: PostingRow = block_on(
+                sqlx::query_as::<_, PostingRow>(
+                    "SELECT posting_id, ref_tx_id, memo, status, hash_chain_head, floor(extract(epoch from created_at))::bigint::text AS created_at FROM postings WHERE posting_id = $1",
+                )
+                .bind(&req.posting_id)
+                .fetch_one(pool),
+            )
+            .map_err(|e| PostError::Validation(format!("post: fetch existing: {}", e)))?;
+            let entries: Vec<EntryRow> = block_on(
+                sqlx::query_as::<_, EntryRow>(
+                    "SELECT entry_id, posting_id, account_id, direction, amount::text AS amount, asset, sequence_number, prev_hash, this_hash, floor(extract(epoch from created_at))::bigint::text AS created_at FROM entries WHERE posting_id = $1 ORDER BY sequence_number",
+                )
+                .bind(&req.posting_id)
+                .fetch_all(pool),
+            )
+            .map_err(|e| PostError::Validation(format!("post: fetch existing entries: {}", e)))?;
+            let entry_ids: Vec<String> = entries.iter().map(|e| e.entry_id.clone()).collect();
+            return Ok((
+                PostingResponse {
+                    posting_id: existing.posting_id,
+                    status: existing.status,
+                    entry_ids,
+                    hash_head: existing.hash_chain_head,
+                },
+                true,
+            ));
+        }
+
+        let mut seq_cursor = next_sequence_from_db(pool, &prev_hash_initial)
+            .map_err(|e| PostError::Validation(format!("post: next sequence: {}", e)))?;
+        for e in &mut created_entries {
+            seq_cursor += 1;
+            e.sequence_number = seq_cursor;
+            block_on(
+                sqlx::query(
+                    "INSERT INTO entries (entry_id, posting_id, account_id, direction, amount, asset, sequence_number, prev_hash, this_hash, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, to_timestamp($10), to_timestamp($10))",
+                )
+                .bind(&e.entry_id)
+                .bind(&e.posting_id)
+                .bind(&e.account_id)
+                .bind(&e.direction)
+                .bind(e.amount as i64)
+                .bind(&e.asset)
+                .bind(e.sequence_number as i64)
+                .bind(&e.prev_hash)
+                .bind(&e.this_hash)
+                .bind(secs(&e.created_at))
+                .execute(&mut *tx),
+            )
+            .map_err(|err| PostError::Validation(format!("post: insert entry: {}", err)))?;
+        }
+
+        block_on(
+            sqlx::query(
+                "INSERT INTO hash_chain (posting_id, head_hash, global_sequence_head, created_at, updated_at)
+                 VALUES ($1, $2, $3, to_timestamp($4), to_timestamp($4))
+                 ON CONFLICT (posting_id) DO NOTHING",
+            )
+            .bind(&req.posting_id)
+            .bind(&hash_head)
+            .bind(&global_sequence_head)
+            .bind(secs(&now))
+            .execute(&mut *tx),
+        )
+        .map_err(|e| PostError::Validation(format!("post: insert anchor: {}", e)))?;
+
+        // DB is the source of truth: commit before touching in-memory.
+        if let Err(e) = block_on(tx.commit()) {
+            return Err(PostError::Validation(format!("post: commit: {}", e)));
+        }
+
+        // Commit succeeded; update the in-memory cache to stay consistent.
+        {
+            let mut st = self.inner.lock();
+            st.postings.insert(
+                req.posting_id.clone(),
+                PostingRecord {
+                    posting_id: req.posting_id.clone(),
+                    ref_tx_id: req.ref_tx_id.clone(),
+                    memo: req.memo.clone(),
+                    status: "POSTED".to_string(),
+                    hash_head: hash_head.clone(),
+                    entries: created_entries.clone(),
+                    created_at: now.clone(),
+                },
+            );
+            st.entries.extend(created_entries.iter().cloned());
+            st.hash_chain_anchors.insert(
+                req.posting_id.clone(),
+                HashChainAnchor {
+                    posting_id: req.posting_id.clone(),
+                    head_hash: hash_head.clone(),
+                    global_sequence_head: global_sequence_head.clone(),
+                    created_at: now.clone(),
+                },
+            );
+            st.global_chain_head = global_sequence_head.clone();
+            st.sequence = seq_cursor;
+        }
+
+        let event = AuditEvent {
+            event_id: uuid::Uuid::now_v7().to_string(),
+            posting_id: req.posting_id.clone(),
+            entry_ids: entry_ids.clone(),
+            hash_head: hash_head.clone(),
+            created_at: now,
+        };
+        {
+            let mut state = self.inner.lock();
+            state.audit_events.push(event.clone());
+        }
+        if let Some(sink) = &self.audit_sink {
+            sink.emit(self, &event);
+        }
+
+        Ok((
+            PostingResponse {
+                posting_id: req.posting_id,
+                status: "POSTED".to_string(),
+                entry_ids,
+                hash_head,
+            },
+            false,
+        ))
+    }
+
+    fn post_via_memory(
+        &self,
+        req: PostingRequest,
+        entries_parsed: Vec<(String, Direction, u64, String)>,
+    ) -> Result<(PostingResponse, bool), PostError> {
+        // Hold the lock for the entire post so concurrent duplicate submissions
+        // serialize exactly (matches the pre-remediation behavior).
+        let mut state = self.inner.lock();
+
+        if let Some(existing) = state.postings.get(&req.posting_id) {
+            return Ok((
+                PostingResponse {
+                    posting_id: existing.posting_id.clone(),
+                    status: existing.status.clone(),
+                    entry_ids: existing
+                        .entries
+                        .iter()
+                        .map(|e| e.entry_id.clone())
+                        .collect(),
+                    hash_head: existing.hash_head.clone(),
+                },
+                true,
+            ));
+        }
+
         for (account_id, _dir, _amount, _asset) in &entries_parsed {
             match state.accounts.get(account_id) {
                 Some(acc) => {
@@ -526,10 +990,13 @@ impl Store {
                 }
             }
         }
-
         for (account_id, dir, _amount, _asset) in &entries_parsed {
-            let acc = state.accounts.get(account_id).unwrap();
-            let account_type = chart::find_type(&acc.type_name).unwrap();
+            let acc = state.accounts.get(account_id).ok_or_else(|| {
+                PostError::Validation(format!("account not found: {}", account_id))
+            })?;
+            let account_type = chart::find_type(&acc.type_name).ok_or_else(|| {
+                PostError::Validation(format!("unknown account type: {}", acc.type_name))
+            })?;
             if !chart::direction_allowed(account_type, *dir) {
                 return Err(PostError::Validation(format!(
                     "direction {:?} not allowed for type {}",
@@ -538,27 +1005,11 @@ impl Store {
             }
         }
 
-        let mut per_asset: HashMap<String, (i128, i128)> = HashMap::new();
-        for (_account_id, dir, amount, asset) in &entries_parsed {
-            let entry = per_asset.entry(asset.clone()).or_insert((0, 0));
-            match dir {
-                Direction::Debit => entry.0 += *amount as i128,
-                Direction::Credit => entry.1 += *amount as i128,
-            }
-        }
-        for (asset, (debits, credits)) in &per_asset {
-            if debits != credits {
-                return Err(PostError::Unbalanced(format!(
-                    "asset {} unbalanced: debits={} credits={}",
-                    asset, debits, credits
-                )));
-            }
-        }
-
         let now = now_iso();
         let mut prev_hash = state.global_chain_head.clone();
         let mut entry_ids: Vec<String> = Vec::new();
         let mut created_entries: Vec<EntryRecord> = Vec::new();
+        let salt = self.salt.clone();
 
         for (account_id, dir, amount, asset) in entries_parsed {
             let entry_id = uuid::Uuid::now_v7().to_string();
@@ -573,7 +1024,7 @@ impl Store {
                 &asset,
                 &now,
             );
-            let this_hash = posting::compute_hash(&prev_hash, &canonical);
+            let this_hash = posting::compute_hash(&prev_hash, &salt, &canonical);
             let record = EntryRecord {
                 entry_id: entry_id.clone(),
                 posting_id: req.posting_id.clone(),
@@ -605,130 +1056,10 @@ impl Store {
             entries: created_entries.clone(),
             created_at: now.clone(),
         };
-
-        if let Some(pool) = &self.pool {
-            let mut tx = block_on(pool.begin())
-                .map_err(|e| PostError::Validation(format!("post: begin tx: {}", e)))?;
-            let inserted_posting = block_on(
-                sqlx::query(
-                    "INSERT INTO postings (posting_id, ref_tx_id, memo, status, hash_chain_head, created_at, updated_at)
-                 VALUES ($1, $2, $3, 'POSTED', $4, to_timestamp($5), to_timestamp($5))
-                 ON CONFLICT (posting_id) DO NOTHING",
-                )
-                .bind(&posting_record.posting_id)
-                .bind(posting_record.ref_tx_id.as_ref())
-                .bind(posting_record.memo.as_ref())
-                .bind(&posting_record.hash_head)
-                .bind(secs(&posting_record.created_at))
-                .execute(&mut *tx),
-            )
-            .map_err(|e| PostError::Validation(format!("post: insert posting: {}", e)))?;
-            if inserted_posting.rows_affected() == 0 {
-                drop(tx);
-                let existing = block_on(
-                    sqlx::query_as::<_, PostingRow>(
-                        "SELECT posting_id, ref_tx_id, memo, status, hash_chain_head, created_at
-                         FROM postings WHERE posting_id = $1",
-                    )
-                    .bind(&req.posting_id)
-                    .fetch_one(pool),
-                )
-                .map_err(|e| PostError::Validation(format!("post: fetch existing: {}", e)))?;
-                let entries: Vec<EntryRow> = block_on(
-                    sqlx::query_as::<_, EntryRow>(
-                        "SELECT entry_id, posting_id, account_id, direction, amount::text AS amount, asset, sequence_number, prev_hash, this_hash, created_at
-                         FROM entries WHERE posting_id = $1 ORDER BY sequence_number",
-                    )
-                    .bind(&req.posting_id)
-                    .fetch_all(pool),
-                )
-                .map_err(|e| PostError::Validation(format!("post: fetch existing entries: {}", e)))?;
-                let entry_ids: Vec<String> = entries.iter().map(|e| e.entry_id.clone()).collect();
-                let replay_resp = PostingResponse {
-                    posting_id: existing.posting_id,
-                    status: existing.status,
-                    entry_ids,
-                    hash_head: existing.hash_chain_head,
-                };
-                let mut st = self.inner.lock();
-                if !st.postings.contains_key(&replay_resp.posting_id) {
-                    st.postings
-                        .insert(replay_resp.posting_id.clone(), posting_record.clone());
-                    for e in entries {
-                        let amount: u64 = e.amount.parse().unwrap_or(0);
-                        st.entries.push(EntryRecord {
-                            entry_id: e.entry_id,
-                            posting_id: e.posting_id,
-                            account_id: e.account_id,
-                            direction: e.direction,
-                            amount,
-                            asset: e.asset,
-                            sequence_number: e.sequence_number as u64,
-                            prev_hash: e.prev_hash,
-                            this_hash: e.this_hash,
-                            created_at: e.created_at,
-                        });
-                    }
-                }
-                return Ok((replay_resp, true));
-            }
-
-            for e in &created_entries {
-                block_on(
-                    sqlx::query(
-                        "INSERT INTO entries (entry_id, posting_id, account_id, direction, amount, asset, sequence_number, prev_hash, this_hash, created_at, updated_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, to_timestamp($10), to_timestamp($10))",
-                    )
-                    .bind(&e.entry_id)
-                    .bind(&e.posting_id)
-                    .bind(&e.account_id)
-                    .bind(&e.direction)
-                    .bind(e.amount as i64)
-                    .bind(&e.asset)
-                    .bind(e.sequence_number as i64)
-                    .bind(&e.prev_hash)
-                    .bind(&e.this_hash)
-                    .bind(secs(&e.created_at))
-                    .execute(&mut *tx),
-                )
-                .map_err(|err| PostError::Validation(format!("post: insert entry: {}", err)))?;
-            }
-
-            block_on(
-                sqlx::query(
-                    "INSERT INTO hash_chain (posting_id, head_hash, global_sequence_head, created_at, updated_at)
-                 VALUES ($1, $2, $3, to_timestamp($4), to_timestamp($4))
-                 ON CONFLICT (posting_id) DO NOTHING",
-                )
-                .bind(&req.posting_id)
-                .bind(&hash_head)
-                .bind(&global_sequence_head)
-                .bind(secs(&now))
-                .execute(&mut *tx),
-            )
-            .map_err(|e| PostError::Validation(format!("post: insert anchor: {}", e)))?;
-
-            if let Err(e) = block_on(tx.commit()) {
-                let mut st = self.inner.lock();
-                let entry_ids_set: std::collections::HashSet<String> =
-                    entry_ids.iter().cloned().collect();
-                st.entries.retain(|e| !entry_ids_set.contains(&e.entry_id));
-                st.postings.remove(&req.posting_id);
-                st.hash_chain_anchors.remove(&req.posting_id);
-                st.global_chain_head = st
-                    .entries
-                    .last()
-                    .map(|e| e.this_hash.clone())
-                    .unwrap_or_else(|| GENESIS_HASH.to_string());
-                return Err(PostError::Validation(format!("post: commit: {}", e)));
-            }
-        }
-
         state
             .postings
             .insert(req.posting_id.clone(), posting_record);
-        state.entries.extend(created_entries);
-
+        state.entries.extend(created_entries.iter().cloned());
         let anchor = HashChainAnchor {
             posting_id: req.posting_id.clone(),
             head_hash: hash_head.clone(),
@@ -764,7 +1095,50 @@ impl Store {
     }
 
     pub fn get_posting(&self, posting_id: &str) -> Option<PostingRecord> {
-        self.inner.lock().postings.get(posting_id).cloned()
+        if let Some(pool) = &self.pool {
+            let p: PostingRow = block_on(
+                sqlx::query_as::<_, PostingRow>(
+                    "SELECT posting_id, ref_tx_id, memo, status, hash_chain_head, floor(extract(epoch from created_at))::bigint::text AS created_at FROM postings WHERE posting_id = $1",
+                )
+                .bind(posting_id)
+                .fetch_optional(pool),
+            )
+            .ok()??;
+            let entries: Vec<EntryRow> = block_on(
+                sqlx::query_as::<_, EntryRow>(
+                    "SELECT entry_id, posting_id, account_id, direction, amount::text AS amount, asset, sequence_number, prev_hash, this_hash, floor(extract(epoch from created_at))::bigint::text AS created_at FROM entries WHERE posting_id = $1 ORDER BY sequence_number",
+                )
+                .bind(posting_id)
+                .fetch_all(pool),
+            )
+            .ok()?;
+            let rec_entries = entries
+                .into_iter()
+                .map(|e| EntryRecord {
+                    entry_id: e.entry_id,
+                    posting_id: e.posting_id,
+                    account_id: e.account_id,
+                    direction: e.direction,
+                    amount: e.amount.parse().unwrap_or(0),
+                    asset: e.asset,
+                    sequence_number: e.sequence_number as u64,
+                    prev_hash: e.prev_hash,
+                    this_hash: e.this_hash,
+                    created_at: e.created_at,
+                })
+                .collect();
+            Some(PostingRecord {
+                posting_id: p.posting_id,
+                ref_tx_id: p.ref_tx_id,
+                memo: p.memo,
+                status: p.status,
+                hash_head: p.hash_chain_head,
+                entries: rec_entries,
+                created_at: p.created_at,
+            })
+        } else {
+            self.inner.lock().postings.get(posting_id).cloned()
+        }
     }
 
     #[allow(dead_code)]
@@ -779,112 +1153,290 @@ impl Store {
 
     #[allow(dead_code)]
     pub fn entry_count(&self) -> usize {
-        self.inner.lock().entries.len()
+        if let Some(pool) = &self.pool {
+            let (count,): (i64,) =
+                block_on(sqlx::query_as("SELECT COUNT(*)::bigint FROM entries").fetch_one(pool))
+                    .map_err(|_| (0i64,))
+                    .unwrap_or((0i64,));
+            count as usize
+        } else {
+            self.inner.lock().entries.len()
+        }
     }
 
     pub fn hash_chain_anchor(&self, posting_id: &str) -> Option<HashChainAnchor> {
-        self.inner
-            .lock()
-            .hash_chain_anchors
-            .get(posting_id)
-            .cloned()
+        if let Some(pool) = &self.pool {
+            let row: Option<AnchorRow> = block_on(
+                sqlx::query_as::<_, AnchorRow>(
+                    "SELECT posting_id, head_hash, global_sequence_head, floor(extract(epoch from created_at))::bigint::text AS created_at FROM hash_chain WHERE posting_id = $1",
+                )
+                .bind(posting_id)
+                .fetch_optional(pool),
+            )
+            .ok()?;
+            row.map(|a| HashChainAnchor {
+                posting_id: a.posting_id,
+                head_hash: a.head_hash,
+                global_sequence_head: a.global_sequence_head,
+                created_at: a.created_at,
+            })
+        } else {
+            self.inner
+                .lock()
+                .hash_chain_anchors
+                .get(posting_id)
+                .cloned()
+        }
     }
 
     pub fn global_chain_head(&self) -> String {
-        self.inner.lock().global_chain_head.clone()
+        if let Some(pool) = &self.pool {
+            last_entry_hash_from_db(pool).unwrap_or_else(|| GENESIS_HASH.to_string())
+        } else {
+            self.inner.lock().global_chain_head.clone()
+        }
     }
 
     pub fn verify_chain(&self) -> Result<(), crate::hashchain::ChainBreak> {
-        let state = self.inner.lock();
-        crate::hashchain::verify_chain(&state)
+        if let Some(pool) = &self.pool {
+            let entries: Vec<EntryRow> = match block_on(sqlx::query_as::<_, EntryRow>(
+                "SELECT entry_id, posting_id, account_id, direction, amount::text AS amount, asset, sequence_number, prev_hash, this_hash, floor(extract(epoch from created_at))::bigint::text AS created_at FROM entries ORDER BY sequence_number",
+            )
+            .fetch_all(pool)) {
+                Ok(e) => e,
+                Err(err) => {
+                    return Err(crate::hashchain::ChainBreak {
+                        entry_id: String::new(),
+                        reason: format!("db read failed: {}", err),
+                    });
+                }
+            };
+            let mut state = LedgerState::new();
+            state.entries = entries
+                .into_iter()
+                .map(|e| EntryRecord {
+                    entry_id: e.entry_id,
+                    posting_id: e.posting_id,
+                    account_id: e.account_id,
+                    direction: e.direction,
+                    amount: e.amount.parse().unwrap_or(0),
+                    asset: e.asset,
+                    sequence_number: e.sequence_number as u64,
+                    prev_hash: e.prev_hash,
+                    this_hash: e.this_hash,
+                    created_at: e.created_at,
+                })
+                .collect();
+            crate::hashchain::verify_chain(&state, &self.salt)
+        } else {
+            let state = self.inner.lock();
+            crate::hashchain::verify_chain(&state, &self.salt)
+        }
     }
 
     pub fn user_custodial_sum(&self, asset: &str) -> i128 {
-        let state = self.inner.lock();
-        let mut total: i128 = 0;
-        for (account_id, acc) in state.accounts.iter() {
-            if acc.type_name == "user_custodial" {
-                total += compute_balance(&state, account_id, asset);
+        if let Some(pool) = &self.pool {
+            let accounts: Vec<(String,)> = match block_on(
+                sqlx::query_as::<_, (String,)>(
+                    "SELECT account_id FROM accounts WHERE type_name = 'user_custodial'",
+                )
+                .fetch_all(pool),
+            ) {
+                Ok(a) => a,
+                Err(_) => return 0,
+            };
+            let mut total: i128 = 0;
+            for (account_id,) in accounts {
+                if let Some(b) = balance_from_db(pool, &account_id, asset) {
+                    total += b;
+                }
             }
+            total
+        } else {
+            let state = self.inner.lock();
+            let mut total: i128 = 0;
+            for (account_id, acc) in state.accounts.iter() {
+                if acc.type_name == "user_custodial" {
+                    total += compute_balance(&state, account_id, asset);
+                }
+            }
+            total
         }
-        total
     }
 
     pub fn write_snapshots(&self) -> Vec<BalanceSnapshot> {
-        let mut state = self.inner.lock();
-        let snaps = crate::snapshot::snapshot_all(&state);
-        state.snapshots = snaps.clone();
-        drop(state);
-
         if let Some(pool) = &self.pool {
-            for s in &snaps {
+            // Compute snapshots from DB.
+            let accounts: Vec<(String, String)> = match block_on(sqlx::query_as::<_, (String, String)>(
+                "SELECT account_id, asset FROM (SELECT DISTINCT account_id, asset FROM entries) e",
+            )
+            .fetch_all(pool)) {
+                Ok(a) => a,
+                Err(_) => return Vec::new(),
+            };
+            let mut snaps = Vec::with_capacity(accounts.len());
+            for (account_id, asset) in accounts {
+                let bal = balance_from_db(pool, &account_id, &asset).unwrap_or(0);
+                let last: Option<(String, i64)> = block_on(
+                    sqlx::query_as::<_, (String, i64)>(
+                        "SELECT entry_id, sequence_number FROM entries WHERE account_id = $1 AND asset = $2 ORDER BY sequence_number DESC LIMIT 1",
+                    )
+                    .bind(&account_id)
+                    .bind(&asset)
+                    .fetch_optional(pool),
+                )
+                .ok()
+                .flatten();
+                let (last_entry_id, last_sequence) = last.unwrap_or_default();
+                let snap_as_of = now_iso();
+                snaps.push(BalanceSnapshot {
+                    account_id: account_id.clone(),
+                    asset: asset.clone(),
+                    balance: bal,
+                    as_of_ts: snap_as_of.clone(),
+                    last_entry_id: last_entry_id.clone(),
+                    last_sequence: last_sequence as u64,
+                });
                 let _ = block_on(
                     sqlx::query(
                         "INSERT INTO balance_snapshots (account_id, asset, balance, as_of_ts, last_entry_id, created_at, updated_at)
                      VALUES ($1, $2, $3::numeric, to_timestamp($4), $5, to_timestamp($4), to_timestamp($4))
                      ON CONFLICT (account_id, asset, as_of_ts) DO NOTHING",
                     )
-                    .bind(&s.account_id)
-                    .bind(&s.asset)
-                    .bind(s.balance.to_string())
-                    .bind(secs(&s.as_of_ts))
-                    .bind(&s.last_entry_id)
+                    .bind(&account_id)
+                    .bind(&asset)
+                    .bind(bal.to_string())
+                    .bind(secs(&snap_as_of))
+                    .bind(&last_entry_id)
                     .execute(pool),
                 );
             }
+            // Mirror into in-memory cache for consistency.
+            {
+                let mut state = self.inner.lock();
+                state.snapshots = snaps.clone();
+            }
+            snaps
+        } else {
+            let mut state = self.inner.lock();
+            let snaps = crate::snapshot::snapshot_all(&state);
+            state.snapshots = snaps.clone();
+            snaps
         }
-
-        snaps
     }
 
     pub fn latest_snapshot(&self, account_id: &str, asset: &str) -> Option<BalanceSnapshot> {
-        let state = self.inner.lock();
-        state
-            .snapshots
-            .iter()
-            .filter(|s| s.account_id == account_id)
-            .rfind(|s| asset.is_empty() || s.asset == asset)
-            .cloned()
+        if let Some(pool) = &self.pool {
+            let row: Option<(String, String, String, String, String)> = block_on(
+                sqlx::query_as::<_, (String, String, String, String, String)>(
+                    "SELECT account_id, asset, balance::text, floor(extract(epoch from as_of_ts))::bigint::text AS as_of_ts, last_entry_id FROM balance_snapshots WHERE account_id = $1 AND ($2 = '' OR asset = $2) ORDER BY as_of_ts DESC LIMIT 1",
+                )
+                .bind(account_id)
+                .bind(asset)
+                .fetch_optional(pool),
+            )
+            .ok()?;
+            let (account_id, snap_asset, balance, as_of_ts, last_entry_id) = row?;
+            let balance: i128 = balance.parse().ok()?;
+            let last_seq: (i64,) = block_on(
+                sqlx::query_as("SELECT sequence_number FROM entries WHERE entry_id = $1")
+                    .bind(&last_entry_id)
+                    .fetch_optional(pool),
+            )
+            .ok()?
+            .unwrap_or((0,));
+            Some(BalanceSnapshot {
+                account_id,
+                asset: snap_asset,
+                balance,
+                as_of_ts,
+                last_entry_id,
+                last_sequence: last_seq.0 as u64,
+            })
+        } else {
+            let state = self.inner.lock();
+            state
+                .snapshots
+                .iter()
+                .filter(|s| s.account_id == account_id)
+                .rfind(|s| asset.is_empty() || s.asset == asset)
+                .cloned()
+        }
     }
 
     pub fn balance_via_snapshot(&self, account_id: &str, asset: &str) -> Option<i128> {
-        let state = self.inner.lock();
-        if !state.accounts.contains_key(account_id) {
-            return None;
-        }
-        let snap = state
-            .snapshots
-            .iter()
-            .filter(|s| s.account_id == account_id)
-            .rfind(|s| asset.is_empty() || s.asset == asset);
-        match snap {
-            Some(s) => {
-                let mut bal = s.balance;
-                let last_seq = s.last_sequence;
-                let delta: i128 = state
-                    .entries
-                    .iter()
-                    .filter(|e| e.account_id == account_id)
-                    .filter(|e| asset.is_empty() || e.asset == asset)
-                    .filter(|e| e.sequence_number > last_seq)
-                    .fold(0i128, |acc, e| {
-                        let d = match e.direction.as_str() {
-                            "DEBIT" => e.amount as i128,
-                            "CREDIT" => -(e.amount as i128),
-                            _ => 0,
-                        };
-                        acc + d
-                    });
-                bal += delta;
-                Some(bal)
+        if let Some(pool) = &self.pool {
+            let exists: Option<(String,)> = block_on(
+                sqlx::query_as("SELECT account_id FROM accounts WHERE account_id = $1")
+                    .bind(account_id)
+                    .fetch_optional(pool),
+            )
+            .ok()?;
+            exists.as_ref()?;
+            let snap: Option<BalanceSnapshot> = self.latest_snapshot(account_id, asset);
+            match snap {
+                Some(s) => {
+                    let delta: i128 = block_on(
+                        sqlx::query_as::<_, (i64,)>(
+                            "SELECT COALESCE(SUM(CASE direction WHEN 'DEBIT' THEN amount ELSE -amount END), 0)::bigint FROM entries WHERE account_id = $1 AND ($2 = '' OR asset = $2) AND sequence_number > $3",
+                        )
+                        .bind(account_id)
+                        .bind(asset)
+                        .bind(s.last_sequence as i64)
+                        .fetch_one(pool),
+                    )
+                    .ok()?
+                    .0 as i128;
+                    Some(s.balance + delta)
+                }
+                None => balance_from_db(pool, account_id, asset),
             }
-            None => Some(compute_balance(&state, account_id, asset)),
+        } else {
+            let state = self.inner.lock();
+            if !state.accounts.contains_key(account_id) {
+                return None;
+            }
+            let snap = state
+                .snapshots
+                .iter()
+                .filter(|s| s.account_id == account_id)
+                .rfind(|s| asset.is_empty() || s.asset == asset);
+            match snap {
+                Some(s) => {
+                    let mut bal = s.balance;
+                    let last_seq = s.last_sequence;
+                    let delta: i128 = state
+                        .entries
+                        .iter()
+                        .filter(|e| e.account_id == account_id)
+                        .filter(|e| asset.is_empty() || e.asset == asset)
+                        .filter(|e| e.sequence_number > last_seq)
+                        .fold(0i128, |acc, e| {
+                            let d = match e.direction.as_str() {
+                                "DEBIT" => e.amount as i128,
+                                "CREDIT" => -(e.amount as i128),
+                                _ => 0,
+                            };
+                            acc + d
+                        });
+                    bal += delta;
+                    Some(bal)
+                }
+                None => Some(compute_balance(&state, account_id, asset)),
+            }
         }
     }
 
     pub fn reconcile_snapshot(&self, snap: &BalanceSnapshot) -> bool {
-        let state = self.inner.lock();
-        crate::snapshot::reconcile_snapshot(&state, snap)
+        if let Some(pool) = &self.pool {
+            let computed = balance_from_db(pool, &snap.account_id, &snap.asset);
+            computed.is_some()
+                && computed == self.balance_via_snapshot(&snap.account_id, &snap.asset)
+                && computed == Some(snap.balance)
+        } else {
+            let state = self.inner.lock();
+            crate::snapshot::reconcile_snapshot(&state, snap)
+        }
     }
 }
 
@@ -944,6 +1496,126 @@ fn compute_balance(state: &LedgerState, account_id: &str, asset: &str) -> i128 {
             "CREDIT" => acc - e.amount as i128,
             _ => acc,
         })
+}
+
+fn balance_from_db(pool: &sqlx::PgPool, account_id: &str, asset: &str) -> Option<i128> {
+    let (bal_str,): (String,) = block_on(
+        sqlx::query_as::<_, (String,)>(
+            "SELECT COALESCE(SUM(CASE direction WHEN 'DEBIT' THEN amount ELSE -amount END), 0)::text FROM entries WHERE account_id = $1 AND ($2 = '' OR asset = $2)",
+        )
+        .bind(account_id)
+        .bind(asset)
+        .fetch_one(pool),
+    )
+    .ok()?;
+    bal_str.parse::<i128>().ok()
+}
+
+fn last_entry_hash_from_db(pool: &sqlx::PgPool) -> Option<String> {
+    let row: Option<(String,)> = block_on(
+        sqlx::query_as::<_, (String,)>(
+            "SELECT this_hash FROM entries ORDER BY sequence_number DESC LIMIT 1",
+        )
+        .fetch_optional(pool),
+    )
+    .ok()?;
+    row.map(|(h,)| h)
+}
+
+fn next_sequence_from_db(pool: &sqlx::PgPool, _prev_hash: &str) -> Result<u64, String> {
+    let (max_seq,): (i64,) = block_on(
+        sqlx::query_as::<_, (i64,)>("SELECT COALESCE(MAX(sequence_number), 0) FROM entries")
+            .fetch_one(pool),
+    )
+    .map_err(|e| format!("next_sequence: {}", e))?;
+    Ok(max_seq as u64)
+}
+
+fn ledger_page_from_db(
+    pool: &sqlx::PgPool,
+    account_id: &str,
+    from: Option<&str>,
+    to: Option<&str>,
+    limit: usize,
+    cursor: Option<u64>,
+) -> Result<LedgerPage, String> {
+    use sqlx::QueryBuilder;
+    let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+        "SELECT entry_id, posting_id, account_id, direction, amount::text AS amount, asset, sequence_number, prev_hash, this_hash, floor(extract(epoch from created_at))::bigint::text AS created_at FROM entries WHERE account_id = ",
+    );
+    qb.push_bind(account_id.to_string());
+    if let Some(f) = from {
+        qb.push(" AND created_at >= to_timestamp(");
+        qb.push_bind(f.to_string());
+        qb.push(")");
+    }
+    if let Some(t) = to {
+        qb.push(" AND created_at <= to_timestamp(");
+        qb.push_bind(t.to_string());
+        qb.push(")");
+    }
+    if let Some(c) = cursor {
+        qb.push(" AND sequence_number > ");
+        qb.push_bind(c as i64);
+    }
+    qb.push(" ORDER BY sequence_number ASC LIMIT ");
+    qb.push_bind((limit + 1) as i64);
+    let rows: Vec<EntryRow> = block_on(qb.build_query_as::<EntryRow>().fetch_all(pool))
+        .map_err(|e| format!("ledger: {}", e))?;
+
+    let final_balance = balance_from_db(pool, account_id, "").unwrap_or(0);
+    let next_cursor = if rows.len() > limit {
+        Some(rows[limit - 1].sequence_number as u64)
+    } else {
+        None
+    };
+    let entries: Vec<EntryRecord> = rows
+        .into_iter()
+        .take(limit)
+        .map(|e| EntryRecord {
+            entry_id: e.entry_id,
+            posting_id: e.posting_id,
+            account_id: e.account_id,
+            direction: e.direction,
+            amount: e.amount.parse().unwrap_or(0),
+            asset: e.asset,
+            sequence_number: e.sequence_number as u64,
+            prev_hash: e.prev_hash,
+            this_hash: e.this_hash,
+            created_at: e.created_at,
+        })
+        .collect();
+
+    let page: Vec<LedgerEntryItem> = entries
+        .iter()
+        .scan(0i128, |acc, e| {
+            match e.direction.as_str() {
+                "DEBIT" => *acc += e.amount as i128,
+                "CREDIT" => *acc -= e.amount as i128,
+                _ => {}
+            }
+            Some(LedgerEntryItem {
+                entry_id: e.entry_id.clone(),
+                posting_id: e.posting_id.clone(),
+                account_id: e.account_id.clone(),
+                direction: e.direction.clone(),
+                amount: e.amount,
+                asset: e.asset.clone(),
+                sequence_number: e.sequence_number,
+                this_hash: e.this_hash.clone(),
+                prev_hash: e.prev_hash.clone(),
+                created_at: e.created_at.clone(),
+                running_balance: *acc,
+            })
+        })
+        .collect();
+
+    Ok(LedgerPage {
+        account_id: account_id.to_string(),
+        entries: page,
+        next_cursor,
+        final_balance,
+    })
 }
 
 pub fn now_iso() -> String {

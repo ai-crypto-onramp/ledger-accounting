@@ -61,7 +61,9 @@ async fn main() {
     let store = if cfg.db_url.is_empty() {
         Store::new()
     } else {
-        match Store::connect(&cfg.db_url).await {
+        match Store::connect_with_salt(&cfg.db_url, cfg.hash_chain_salt.clone().unwrap_or_default())
+            .await
+        {
             Ok(s) => {
                 if let Err(e) = s.run_migrations().await {
                     eprintln!("[boot] {}", e);
@@ -70,6 +72,9 @@ async fn main() {
                 if let Err(e) = s.hydrate().await {
                     eprintln!("[boot] {}", e);
                     std::process::exit(1);
+                }
+                if cfg.hash_chain_salt.is_none() {
+                    eprintln!("[boot] WARNING: HASH_CHAIN_SALT unset; hash chain is forgeable by anyone with DB write access");
                 }
                 eprintln!("[boot] connected to postgres at {}", cfg.db_url);
                 s

@@ -9,7 +9,7 @@ pub struct ChainBreak {
     pub reason: String,
 }
 
-pub fn verify_chain(state: &LedgerState) -> Result<(), ChainBreak> {
+pub fn verify_chain(state: &LedgerState, salt: &str) -> Result<(), ChainBreak> {
     let mut prev_hash = GENESIS_HASH.to_string();
     for e in &state.entries {
         let dir = match e.direction.as_str() {
@@ -31,7 +31,7 @@ pub fn verify_chain(state: &LedgerState) -> Result<(), ChainBreak> {
             &e.asset,
             &e.created_at,
         );
-        let expected = posting::compute_hash(&prev_hash, &canonical);
+        let expected = posting::compute_hash(&prev_hash, salt, &canonical);
         if e.prev_hash != prev_hash {
             return Err(ChainBreak {
                 entry_id: e.entry_id.clone(),
@@ -99,7 +99,7 @@ mod tests {
     #[test]
     fn verify_chain_empty_is_ok() {
         let state = LedgerState::new();
-        assert!(verify_chain(&state).is_ok());
+        assert!(verify_chain(&state, "").is_ok());
     }
 
     #[test]
@@ -114,15 +114,15 @@ mod tests {
             "USD",
             "1000",
         );
-        let h1 = posting::compute_hash(GENESIS_HASH, &c1);
+        let h1 = posting::compute_hash(GENESIS_HASH, "", &c1);
         let e1 = entry("e1", 1, GENESIS_HASH, &h1, "DEBIT", 10);
         // Compute proper hash for e2 to follow e1.
         let c2 = posting::canonical_bytes(&h1, "e2", "acct", Direction::Credit, 10, "USD", "1000");
-        let h2 = posting::compute_hash(&h1, &c2);
+        let h2 = posting::compute_hash(&h1, "", &c2);
         let e2 = entry("e2", 2, &h1, &h2, "CREDIT", 10);
         let mut state = LedgerState::new();
         state.entries = vec![e1, e2];
-        assert!(verify_chain(&state).is_ok());
+        assert!(verify_chain(&state, "").is_ok());
     }
 
     #[test]
@@ -130,7 +130,7 @@ mod tests {
         let e1 = entry("e1", 1, GENESIS_HASH, "h1", "SIDEWAYS", 10);
         let mut state = LedgerState::new();
         state.entries = vec![e1];
-        let err = verify_chain(&state).unwrap_err();
+        let err = verify_chain(&state, "").unwrap_err();
         assert_eq!(err.entry_id, "e1");
         assert!(err.reason.contains("invalid direction"));
     }
@@ -140,7 +140,7 @@ mod tests {
         let e1 = entry("e1", 1, "wrong-prev", "h1", "DEBIT", 10);
         let mut state = LedgerState::new();
         state.entries = vec![e1];
-        let err = verify_chain(&state).unwrap_err();
+        let err = verify_chain(&state, "").unwrap_err();
         assert_eq!(err.entry_id, "e1");
         assert!(err.reason.contains("prev_hash mismatch"));
     }
@@ -150,9 +150,29 @@ mod tests {
         let e1 = entry("e1", 1, GENESIS_HASH, "wrong-this", "DEBIT", 10);
         let mut state = LedgerState::new();
         state.entries = vec![e1];
-        let err = verify_chain(&state).unwrap_err();
+        let err = verify_chain(&state, "").unwrap_err();
         assert_eq!(err.entry_id, "e1");
         assert!(err.reason.contains("this_hash mismatch"));
+    }
+
+    #[test]
+    fn verify_chain_with_salt_detects_tamper() {
+        // Entries hashed with salt "s1"; verifying with salt "s2" must break.
+        let c1 = posting::canonical_bytes(
+            GENESIS_HASH,
+            "e1",
+            "acct",
+            Direction::Debit,
+            10,
+            "USD",
+            "1000",
+        );
+        let h1 = posting::compute_hash(GENESIS_HASH, "s1", &c1);
+        let e1 = entry("e1", 1, GENESIS_HASH, &h1, "DEBIT", 10);
+        let mut state = LedgerState::new();
+        state.entries = vec![e1];
+        assert!(verify_chain(&state, "s1").is_ok());
+        assert!(verify_chain(&state, "s2").is_err());
     }
 
     #[test]
